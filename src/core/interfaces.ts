@@ -3,7 +3,7 @@
 
 import type { ZodType } from 'zod'
 import type { Scenario } from './scenario.js'
-import type { Effort, ModelRef, ToolCall, Trace, Turn, Usage } from './trace.js'
+import type { Effort, ModelRef, ToolCall, ToolCallSupport, Trace, Turn, Usage } from './trace.js'
 
 export interface RunContext {
   runId: string
@@ -26,15 +26,6 @@ export interface TargetReply<Session> {
   /** Replaces the old previousState / nextState pair. */
   session?: Session
 }
-
-/**
- * How far the framework can trust the target's tool calls.
- *  - none: the target cannot report them. Tool-call graders are skipped.
- *  - reported: the target returns them, but the response shape has not been
- *    confirmed against a live account. Graders run and the report warns.
- *  - verified: a contract test has confirmed the shape.
- */
-export type ToolCallSupport = 'none' | 'reported' | 'verified'
 
 export interface Target<Session = unknown> {
   name: string
@@ -109,8 +100,12 @@ export interface GraderResult {
   score?: number
   criteria?: CriterionResult[]
   reason: string
+  /** Things a reader should know before trusting this result. */
+  warnings?: string[]
   evidence?: { turnIndex?: number; toolCallIndex?: number }[]
   usage?: Usage
+  /** The model behind an LLM grader, including which one actually answered. */
+  model?: ModelRef
 }
 
 export interface Grader {

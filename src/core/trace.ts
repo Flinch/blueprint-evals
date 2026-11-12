@@ -22,6 +22,15 @@ export interface Turn {
   at: string
 }
 
+/**
+ * How far the framework can trust a target's tool calls.
+ *  - none: the target cannot report them. Tool-call graders are skipped.
+ *  - reported: the target returns them, but the response shape has not been
+ *    confirmed against a live account. Graders run and the result warns.
+ *  - verified: a contract test has confirmed the shape.
+ */
+export type ToolCallSupport = 'none' | 'reported' | 'verified'
+
 export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
 
 export interface ModelRef {
@@ -53,7 +62,8 @@ export interface Trace {
   schemaVersion: 1
   runId: string
   scenario: { id: string; version: string }
-  target: { name: string; kind: string; version?: string }
+  /** toolCalls records what the target declared, so graders stay pure functions of the trace. */
+  target: { name: string; kind: string; toolCalls: ToolCallSupport; version?: string }
   turns: Turn[]
   startedAt: string
   endedAt: string

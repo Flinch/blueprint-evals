@@ -117,7 +117,9 @@ interface Trace {
   schemaVersion: 1
   runId: string
   scenario: { id: string; version: string }
-  target: { name: string; kind: string; version?: string }
+  // toolCalls records what the target declared, so graders stay pure
+  // functions of the trace.
+  target: { name: string; kind: string; toolCalls: ToolCallSupport; version?: string }
   turns: Turn[]
   startedAt: string           // ISO 8601
   endedAt: string
@@ -383,7 +385,9 @@ interface GraderResult {
   score?: number               // 0..1
   criteria?: CriterionResult[]
   reason: string
+  warnings?: string[]          // things a reader should know before trusting this result
   evidence?: { turnIndex?: number; toolCallIndex?: number }[]
+  model?: ModelRef             // for LLM graders, including which model actually answered
   usage?: Usage
 }
 
@@ -409,23 +413,51 @@ Status meanings:
   with `toolCalls: 'none'`. Always carries a reason. A skipped check never
   counts as a pass.
 
-**M0 graders**
+**M0 graders** (implemented)
 
-- Deterministic, ported as-is: `tool_called`, `tool_arg_match`,
-  `must_not_call`, `output_field_equals`, `output_equals`,
-  `output_array_length`. `tool_arg_match` keeps strict equality in M0. Semantic
-  matching is M3.
-- `min-content`: the degenerate-output guard, now its own grader that runs
-  before any LLM grader.
-- `rubric-judge`: the G-Eval-style judge. Reasoning per criterion before
-  scoring, anchors as calibration examples, structured output, per-criterion
-  bands using the existing `borderlineBandFor`.
-- `goal-check`: did the agent achieve the scenario's goal. Kept separate from
-  the rubric judge, as today.
+- Deterministic, ported: `tool_called`, `tool_arg_match`, `must_not_call`,
+  `output_field_equals`, `output_equals`, `output_array_length`. Two changes
+  from the original: comparison is structural (nested objects and key order no
+  longer cause false failures; there is still no semantic matching, which is
+  M3), and every result carries evidence pointing at the turn and tool call it
+  is about. `output_field_equals` accepts a flat key or a JSON path.
+- `min-content`: the degenerate-output guard, now its own grader. It counts the
+  **assistant's** output only. The original counted every turn, so a long
+  simulated-user message could hide an empty agent reply from it.
+- `rubric-judge`: G-Eval style, with reasoning per criterion before scoring.
+  Changes from the original:
+  - Verdicts are matched by criterion **id**, and every criterion must be
+    scored exactly once. The original silently averaged over whatever came
+    back.
+  - Output is schema-validated. A missing, unknown or duplicate criterion, a
+    refusal, a token-limit stop or an unparseable response is an `error`.
+  - **Pass thresholds and weights are not shown to the judge by default.**
+    Telling a judge "pass threshold 0.7" invites it to anchor on 0.7, which
+    clusters scores at the threshold and produces uncertain verdicts. This is a
+    hypothesis about the 52-of-52 "borderline" result, not a measured fact, so
+    it is testable: `showThresholds: true` restores the old prompt for an A/B
+    comparison.
+  - The transcript includes tool calls and is delimited as untrusted data, with
+    a literal closing tag defused so it cannot break out.
+- `goal-check`: did the agent achieve the scenario's goal. Skipped, with a
+  reason, when the scenario has no goal. It is a verdict: a goal failure fails
+  the run. The original recorded it separately from run status, so Blueprint's
+  wrapper filters it out of aggregation to keep legacy status unchanged (see
+  [Open questions](#open-questions)).
 
-Deterministic graders run first. If one fails, LLM graders are skipped, which
-matches today's behavior and saves the cost. `shortCircuit: false` in config
-runs everything regardless.
+`runGraders` orders them and enforces the rules that belong to no single
+grader:
+
+- Deterministic graders run first, then everything else.
+- A grader that `requires` tool calls is **skipped**, with a reason, on a
+  target whose `toolCalls` is `none`. On a `reported` target it runs and its
+  result carries a warning. On a `verified` target it runs clean.
+- `must_not_call` passes with a warning when no tool call was reported at all
+  in the run, since that pass may be vacuous.
+- A grader that throws becomes an `error` result, so one bad grader cannot lose
+  the others' results or pass for a verdict on the agent.
+- If a deterministic grader fails, LLM graders are skipped (and say why).
+  `shortCircuit: false` runs everything regardless.
 
 ### Verdict aggregation
 
@@ -617,7 +649,14 @@ depends on it by git URL.
 - **Aggregation tests**, table-driven, including the offline replay of the
   stored Vapi results.
 - **Parity test.** One recorded transcript graded by the old runner and the new
-  one must produce the same deterministic results and the same judge inputs.
+  one must produce the same deterministic results. The judge prompt
+  intentionally differs (ids, no thresholds, tool calls, delimiters), so judge
+  parity is checked by running both prompts on stored transcripts and comparing
+  score distributions, which is the A/B the `showThresholds` option exists for.
+- **Ground-truth test.** The deterministic graders run over real HTTP against
+  the stub agent. The correct agent passes the example scenarios and the agent
+  with the planted `no-confirm` defect fails the ones it should, with evidence
+  pointing at the offending call.
 - **Vapi contract test.** One live conversation against a test assistant with a
   tool, saving the real response as a fixture and confirming where tool calls
   appear. It makes paid API calls, so it runs only on request. When it passes,
@@ -681,7 +720,12 @@ under [Decisions](#decisions). What remains:
 2. **Status name.** This doc uses `uncertain` in the framework and keeps
    "borderline" as Blueprint's display label. Pick one word for both if that
    reads better in reports.
-3. **Stub agent scope.** Rule-based replies are enough to exercise the `http`
+3. **Goal-check and run status.** In the framework a failed goal fails the run.
+   In Blueprint's current data it never did. The wrapper can exclude
+   `goal-check` from aggregation to preserve existing statuses, but then the
+   dashboard's status and the framework's disagree. Decide whether to keep
+   that gap or let goal failures count.
+4. **Stub agent scope.** Rule-based replies are enough to exercise the `http`
    target and the graders, but they cannot show an LLM judge doing anything
    interesting. If the examples feel hollow, pull the first zoo agent (an
    LLM-backed booking agent) forward from M1 rather than growing the stub.

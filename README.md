@@ -6,9 +6,10 @@ It drives simulated users through conversations with an agent, records exactly
 what happened, grades the result with deterministic checks and calibrated LLM
 judges, and reports a verdict you can audit.
 
-**Status:** early. The interfaces and the verdict-aggregation rule are
-implemented and tested. Targets, simulators, graders, the runner and the CLI
-are next. See the [M0 design doc](docs/design/0001-m0-core-interfaces.md) for
+**Status:** early. Implemented and tested: the interfaces, the verdict
+aggregation rule, the `http` target, the stub agent, and the graders
+(deterministic checks, the rubric judge, goal check). The model provider,
+simulator, runner and CLI are next. See the [M0 design doc](docs/design/0001-m0-core-interfaces.md) for
 the plan and the reasoning.
 
 ## Why another eval tool

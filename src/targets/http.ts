@@ -1,7 +1,7 @@
 import { interpolateEnv, type TargetConfig } from '../core/config.js'
-import type { RunContext, Target, TargetInput, TargetReply, ToolCallSupport } from '../core/interfaces.js'
+import type { RunContext, Target, TargetInput, TargetReply } from '../core/interfaces.js'
 import { queryAll, queryOne } from '../core/jsonpath.js'
-import type { ToolCall } from '../core/trace.js'
+import type { ToolCall, ToolCallSupport } from '../core/trace.js'
 
 // A generic adapter for any agent with an HTTP endpoint. The request body is
 // built from a template and the reply text, session id and tool calls are read
