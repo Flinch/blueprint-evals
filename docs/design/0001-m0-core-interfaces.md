@@ -343,22 +343,43 @@ interface ModelProvider {
 }
 ```
 
-The default `anthropic` provider uses `@anthropic-ai/sdk`:
+The default `anthropic` provider uses `@anthropic-ai/sdk` (implemented):
 
-- **Structured outputs for judges.** The judge's response is validated against
-  a schema by the API, so fence stripping and the "invalid JSON becomes
-  borderline" path both go away.
-- **Effort set explicitly per role.** Judges default to `high`, the simulator to
-  `low`. Both are configurable.
-- **Refusals.** A `refusal` stop reason is a grader `error`. Red-team scenarios
-  in M5 will hit this, and it must never be counted as a pass or a fail.
-- **Server-side fallbacks** are on by default, so a declined request is retried
-  on another model inside the same call. The model that actually answered is
-  recorded in `ModelRef.servedBy`. A verdict produced by a fallback model is
-  excluded from judge-calibration statistics, because the calibration belongs
-  to the pinned judge. Turn fallbacks off in config to fail fast instead.
-- **Cost** is computed from token usage and a price table in config. The SDK
-  reports tokens and leaves pricing to the caller.
+- **Structured outputs for judges.** The response is requested as JSON against a
+  schema and then validated again in the provider. The API enforces structure
+  but not value ranges such as "score between 0 and 1", so the second check is
+  needed. A response that fails validation comes back with `parsed` unset and
+  the grader reports it as invalid output.
+- **Effort set explicitly per call.** Opus 5.5 defaults to `medium`, and a
+  judge should not inherit that silently. Judges default to `high`, the
+  simulator to `low`; both are configurable and a request can override them.
+- **No sampling parameters and no thinking setting.** Current models reject
+  `temperature` and friends and cannot have thinking disabled, so neither is
+  sent. Effort is the only depth control.
+- **Refusals** come back as `stopReason: "refusal"` with empty text, never as
+  output, so a grader cannot mistake one for a verdict. Red-team scenarios in M5
+  will hit this.
+- **Server-side fallbacks** are on by default (`fallbacks: "default"`), so a
+  declined request is retried on another model inside the same call. The model
+  that actually answered is recorded in `ModelRef.servedBy`. A verdict produced
+  by a fallback model is excluded from judge-calibration statistics, because the
+  calibration belongs to the pinned judge. Turn fallbacks off in config to fail
+  fast instead.
+- **One deadline per call.** The SDK retries timeouts itself, which would
+  multiply a per-attempt timeout, so the deadline is an abort signal covering the
+  whole call, retries included. An external signal can be combined with it.
+- **Streaming.** Judge calls with thinking can exceed HTTP timeouts when
+  buffered, so every request streams.
+- **Cost** is computed from token usage and a price table in config. When the
+  API reports per-iteration usage (as it does when a fallback ran), each
+  iteration is priced at its own model's rates, because a declined attempt and
+  the rescuing attempt bill differently. A model with no price entry makes the
+  call's cost `null`, never zero, and a total with any unknown part is `null`.
+  Cache tokens are counted as ordinary input, a conservative overestimate, since
+  the framework does not use prompt caching.
+- **Verified so far against a fake client only.** An opt-in live test
+  (`EVALS_LIVE=1`, two calls on Haiku 5.5, under one cent) confirms the real API
+  accepts the request shape. It has not been run yet.
 
 **Default models.** For new users, both roles default to `claude-opus-5-5`.
 Blueprint's wrapper pins the judge to the model its existing results were

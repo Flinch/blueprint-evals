@@ -52,7 +52,11 @@ export interface CompleteRequest {
   /** Structured output. The response is validated against this schema. */
   schema?: ZodType
   effort?: Effort
+  /** Output cap. Provider defaults depend on the role. */
+  maxTokens?: number
+  /** Overall deadline for the call, retries included. */
   timeoutMs: number
+  signal?: AbortSignal
 }
 
 export interface CompleteResponse {

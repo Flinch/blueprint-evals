@@ -7,8 +7,9 @@ what happened, grades the result with deterministic checks and calibrated LLM
 judges, and reports a verdict you can audit.
 
 **Status:** early. Implemented and tested: the interfaces, the verdict
-aggregation rule, the `http` target, the stub agent, and the graders
-(deterministic checks, the rubric judge, goal check). The model provider,
+aggregation rule, the `http` target, the stub agent, the graders
+(deterministic checks, the rubric judge, goal check) and the Anthropic model
+provider (tested against a fake client; an opt-in live test is included). The
 simulator, runner and CLI are next. See the [M0 design doc](docs/design/0001-m0-core-interfaces.md) for
 the plan and the reasoning.
 
