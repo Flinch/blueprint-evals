@@ -27,7 +27,8 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "stub-agent": "tsx examples/stub-agent/serve.ts"
   },
   "repository": {
     "type": "git",
@@ -49,6 +50,7 @@
   },
   "devDependencies": {
     "@types/node": "^26.6.6",
+    "tsx": "^4.23.15",
     "typescript": "^7.0.2",
     "vitest": "^5.1.0"
   }

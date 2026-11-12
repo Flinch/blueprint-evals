@@ -1,0 +1,19 @@
+id: reschedule-tomorrow-3pm
+version: 1
+target: stub-agent
+persona: >
+  A patient who wants to move their appointment to 3pm tomorrow. Polite and a
+  little rushed. Confirms when asked.
+seed_message: "Hi, can you move my appointment to 3pm tomorrow?"
+goal: The appointment is rescheduled to 15:00 tomorrow and the patient is told so.
+max_turns: 6
+checks:
+  - type: tool_called
+    tool: reschedule_appointment
+  - type: tool_arg_match
+    tool: reschedule_appointment
+    args: { date: tomorrow, time: "15:00" }
+  - type: must_not_call
+    tool: cancel_appointment
+rubric: rubrics/scheduling.yaml
+tags: [scheduling, happy-path]

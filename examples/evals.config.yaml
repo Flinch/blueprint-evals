@@ -1,0 +1,22 @@
+# Example config. Start the stub agent first:  npm run stub-agent
+models:
+  simulator: { provider: anthropic, model: claude-opus-5-5, effort: low }
+  judge:     { provider: anthropic, model: claude-opus-5-5, effort: high, fallbacks: true }
+pricing:
+  claude-opus-5-5: { inputPerMTok: 4.00, outputPerMTok: 20.00 }
+targets:
+  stub-agent:
+    kind: http
+    url: http://127.0.0.1:4010/chat
+    request:
+      body:
+        message: "{{input.text}}"
+        conversation_id: "{{session}}"
+    response:
+      text: "$.reply"
+      session: "$.conversation_id"
+      toolCalls:
+        path: "$.tool_calls[*]"
+        name: "$.name"
+        arguments: "$.args"
+    toolCalls: reported

@@ -17,6 +17,33 @@ export function resolveSecret(ref: string, env: NodeJS.ProcessEnv = process.env)
   return value
 }
 
+const ENV_REF_ANYWHERE = /\$\{env:([A-Za-z_][A-Za-z0-9_]*)\}/g
+
+/** Replaces every ${env:NAME} in a string. Throws if a variable is unset. */
+export function interpolateEnv(text: string, env: NodeJS.ProcessEnv = process.env): string {
+  return text.replace(ENV_REF_ANYWHERE, (_, name: string) => {
+    const value = env[name]
+    if (value === undefined || value === '') throw new Error(`environment variable ${name} is not set`)
+    return value
+  })
+}
+
+// Header names that carry credentials. A value for one of these must reference
+// the environment, so a literal token cannot be committed by accident.
+const SENSITIVE_HEADER = /authorization|api[-_]?key|token|secret|cookie/i
+
+const HeadersSchema = z.record(z.string(), z.string()).default({}).superRefine((headers, ctx) => {
+  for (const [name, value] of Object.entries(headers)) {
+    if (SENSITIVE_HEADER.test(name) && !/\$\{env:[A-Za-z_][A-Za-z0-9_]*\}/.test(value)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: [name],
+        message: `header "${name}" looks like a credential: use an environment reference like \${env:NAME}, never a literal value`,
+      })
+    }
+  }
+})
+
 const ModelConfig = z.object({
   provider: z.string().default('anthropic'),
   model: z.string(),
@@ -32,7 +59,8 @@ export const TargetConfigSchema = z.discriminatedUnion('kind', [
   z.object({
     kind: z.literal('http'),
     url: z.string().url(),
-    headers: z.record(z.string(), z.string()).default({}),
+    headers: HeadersSchema,
+    timeoutMs: z.number().int().positive().default(30_000),
     request: z.object({ body: z.record(z.string(), z.unknown()) }),
     response: z.object({
       text: z.string(),
