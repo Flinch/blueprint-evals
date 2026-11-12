@@ -10,7 +10,9 @@ judges, and reports a verdict you can audit.
 aggregation rule, the `http` target, the stub agent, the graders
 (deterministic checks, the rubric judge, goal check), the Anthropic model
 provider (tested against a fake client; an opt-in live test is included), the
-persona and scripted simulators, the scenario loader and the runner. The
+persona and scripted simulators, the scenario loader, the runner, and the
+calibration core (label files, stable splits, a contamination guard, and true
+positive and negative rates with intervals). The
 reporters and the CLI are next, so `evals run` does not exist yet, but
 `runScenario` works end to end from code. See the [M0 design doc](docs/design/0001-m0-core-interfaces.md) for
 the plan and the reasoning.

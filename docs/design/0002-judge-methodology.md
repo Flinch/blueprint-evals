@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| Status | Draft. Part A is implemented, the rest is planned |
+| Status | Draft. Parts A and B are implemented, the rest is planned |
 | Date | 2026-11-12 |
 | Supersedes | The banded-score judge and `uncertain` status in [0001](0001-m0-core-interfaces.md) |
 | Source | Hamel Husain, ["Creating a LLM-as-a-Judge That Drives Business Results"](https://hamel.dev/blog/posts/llm-judge/) (the "critique shadowing" process) |
@@ -92,7 +92,9 @@ A response is often only wrong relative to what was asked, which is why the
 input matters. `excerpt`, `label` and `rationale` become `output`, `verdict` and
 `critique`.
 
-## Part B: calibration (planned, M4)
+## Part B: calibration (implemented)
+
+Code: `src/calibration/` (`labels.ts`, `metrics.ts`, `evaluate.ts`). Library only for now: there is no `evals calibrate` command until the CLI exists.
 
 ### The label file
 
@@ -101,28 +103,40 @@ Blueprint, a CLI, or a hand-edited file.
 
 | Field | Meaning |
 |---|---|
-| `id` | Stable id of the labelled item (a run id plus criterion id) |
+| `id` | Unique within the file |
+| `group` | Optional. The conversation or run the label belongs to. Every label with the same group lands in the same split, so one transcript can never be a few-shot example for one criterion and a test case for another. Defaults to `id` |
+| `criterion` | The rubric criterion the verdict is about |
 | `input`, `output` | The context and the response being judged |
 | `verdict` | `pass` or `fail`, from the human |
-| `critique` | Written for every label, not only disagreements. The post's training material is exactly the confirmations with a critique |
+| `critique` | Required on every label, not only disagreements. The post's training material is exactly the confirmations with a critique |
 | `labeler` | Who labelled it |
-| `split` | `train`, `dev` or `test` |
 | `sampled_by` | `random` or `targeted` |
-| `at` | Timestamp |
+| `at` | ISO timestamp |
+
+There is no `split` field. It is derived from the hash below, and a stored value
+would let an example be moved to the wrong side by hand, so a file that contains
+one is rejected.
 
 ### Splits and the contamination guard
 
-- The split is assigned by a stable hash of the id (roughly 15 percent train,
-  42.5 percent each dev and test), so an item never moves between splits.
-- Anchors may be built only from `train` labels. A function that builds a judge
-  from labels refuses any other split.
-- Metrics refuse to evaluate an item that appears in the judge's prompt. This is
+- The split is assigned by a stable hash of the group (or the id when there is
+  no group), roughly 15 percent train and 42.5 percent each dev and test, so an
+  item never moves between splits as labels are added. A test pins golden
+  values so the hash cannot change by accident.
+- Anchors may be built only from `train` labels. `anchorsFromLabels` throws on
+  any other split, naming each offender.
+- A judge declares the few-shot examples in its prompt (`LabelJudge.anchors`),
+  and `evaluateJudge` refuses to run if any of them matches a dev or test label,
+  whichever split is being measured. Matching is on the input and output,
+  ignoring case, spacing and criterion, so a copied example is caught. This is
   enforced in code, so contamination is impossible by construction. Blueprint's
   current flow promotes a correction into the anchors while the same result
   still counts toward agreement, which grades the judge on examples it was
   shown.
-- `dev` is for iterating on the prompt. `test` is scored once per judge version,
-  and the number of times it has been looked at is recorded.
+- `dev` is for iterating on the prompt. `test` is meant to be scored once per
+  judge version, with the number of looks recorded. The recording needs a judge
+  identity (model, effort, prompt hash), so it arrives with step C. Until then
+  nothing stops a second look at test.
 
 ### Metrics
 
@@ -134,11 +148,18 @@ Blueprint, a CLI, or a hand-edited file.
   dangerous error.
 - Raw agreement is shown only alongside prevalence, since it is misleading when
   most cases pass. Cohen's kappa is secondary and unstable on imbalanced data.
-- A result is flagged `insufficient` when either class has fewer than 30 labels
-  in the evaluated set or the total is under 60. These are the post's own rules
+- A result is flagged `insufficient`, with a warning that says which part, when
+  either class has fewer than 30 labels in the evaluated set or the total is
+  under 60. These are the post's own rules
   of thumb, applied as warnings, not cutoffs.
-- Accuracy metrics use random-sampled labels only. Targeted labels feed
-  discovery and anchors.
+- Accuracy metrics use random-sampled labels only by default. Targeted labels
+  feed discovery and anchors. `selection: 'all'` includes them and the report
+  says the rates then describe the sample reviewed.
+- An item the judge could not judge (timeout, refusal, invalid output) is
+  reported and kept out of the rates, never silently dropped.
+- A rubric judge is evaluated one criterion at a time: a label about one
+  criterion is judged against that criterion alone, with only the examples that
+  illustrate it.
 
 ### Sampling
 
@@ -196,7 +217,7 @@ framework:
 | Step | What | Status |
 |---|---|---|
 | A | Binary judge, derived score, `goalAchieved`, anchors with input | Done |
-| B | Label file, splits, contamination guard, TPR/TNR with intervals | Planned |
+| B | Label file, splits, contamination guard, TPR/TNR with intervals | Done |
 | C | Sampling quota, labelers, judge identity, self-consistency | Planned |
 | D | `dimensions`, failure rate by dimension, root-cause tags | Planned |
 | E | Bug zoo as judge ground truth | With M1 |
