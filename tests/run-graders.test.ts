@@ -9,7 +9,7 @@ import { agent, call, makeTrace, user } from './helpers.js'
 const scenario = ScenarioSchema.parse({ id: 's', version: 1, target: 't', persona: 'p' })
 const ctx = { runId: 'r1' }
 const rubric = RubricSchema.parse({ id: 'r', version: 1, criteria: [{ id: 'a', text: 'A' }] })
-const goodJudge = () => createFakeProvider({ json: { verdicts: [{ criterion_id: 'a', rationale: 'ok', score: 0.95 }] } })
+const goodJudge = () => createFakeProvider({ json: { verdicts: [{ criterion_id: 'a', critique: 'ok', verdict: 'pass' }] } })
 const talk = [user('hi'), agent('Your appointment is moved.', [call('reschedule_appointment')])]
 
 describe('runGraders', () => {

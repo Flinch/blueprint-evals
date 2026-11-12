@@ -28,9 +28,26 @@ describe('RubricSchema', () => {
     })
     expect(r.success).toBe(false)
   })
-  it('defaults weight, threshold and critical', () => {
+  it('rejects a leftover threshold loudly, since its meaning changed', () => {
+    const r = RubricSchema.safeParse({ id: 'r', version: 1, criteria: [{ id: 'a', text: 'one', threshold: 0.7 }] })
+    expect(r.success).toBe(false)
+    expect(JSON.stringify((r as { error: unknown }).error)).toMatch(/threshold/)
+  })
+  it('rejects an anchor that points at a criterion the rubric does not have', () => {
+    const r = RubricSchema.safeParse({
+      id: 'r', version: 1, criteria: [{ id: 'a', text: 'one' }],
+      anchors: [{ criterion: 'ghost', output: 'x', verdict: 'fail', critique: 'because' }],
+    })
+    expect(r.success).toBe(false)
+  })
+  it('requires a critique on every anchor, and takes an optional input', () => {
+    const base = { id: 'r', version: 1, criteria: [{ id: 'a', text: 'one' }] }
+    expect(RubricSchema.safeParse({ ...base, anchors: [{ output: 'x', verdict: 'pass', critique: '' }] }).success).toBe(false)
+    expect(RubricSchema.safeParse({ ...base, anchors: [{ input: 'q', output: 'x', verdict: 'pass', critique: 'fine' }] }).success).toBe(true)
+  })
+  it('defaults weight and critical', () => {
     const r = RubricSchema.parse({ id: 'r', version: 1, criteria: [{ id: 'a', text: 'one' }] })
-    expect(r.criteria[0]).toMatchObject({ weight: 1, threshold: 0.7, critical: false })
+    expect(r.criteria[0]).toMatchObject({ weight: 1, critical: false })
   })
 })
 

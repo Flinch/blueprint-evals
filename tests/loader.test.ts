@@ -64,7 +64,7 @@ describe('gradersForScenario', () => {
     const { scenario, rubric } = loadScenario(join(examples, 'scenarios', 'reschedule.yaml'))
     const names = gradersForScenario(scenario, { rubric, provider }).map(g => g.name)
     expect(names[0]).toBe('min-content')
-    expect(names).toContain('rubric-judge(scheduling@1)')
+    expect(names).toContain('rubric-judge(scheduling@2)')
     expect(names.at(-1)).toBe('goal-check')
   })
   it('refuses to build a scenario that names a rubric without one, or needs a model without one', () => {

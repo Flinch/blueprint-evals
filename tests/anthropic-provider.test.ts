@@ -205,7 +205,7 @@ describe('end to end with the rubric judge', () => {
     const rubric = RubricSchema.parse({ id: 'r', version: 1, criteria: [{ id: 'a', text: 'A' }] })
     const scenario = ScenarioSchema.parse({ id: 's', version: 1, target: 't', persona: 'p' })
     const trace = makeTrace([user('hi'), agent('Your appointment is moved.')])
-    const verdict = JSON.stringify({ verdicts: [{ criterion_id: 'a', rationale: 'ok', score: 0.95 }] })
+    const verdict = JSON.stringify({ verdicts: [{ criterion_id: 'a', critique: 'ok', verdict: 'pass' }] })
 
     const ok = createAnthropicProvider({ models, pricing, client: fakeClient(async () => message([text(verdict)])).client })
     const r1 = await createRubricJudge({ rubric, provider: ok }).grade(trace, scenario, { runId: 'r' })

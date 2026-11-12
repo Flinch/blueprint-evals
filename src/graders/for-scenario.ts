@@ -12,7 +12,6 @@ export interface ScenarioGraderOptions {
   provider?: ModelProvider
   judgeEffort?: Effort
   judgeTimeoutMs?: number
-  showThresholds?: boolean
 }
 
 /**
@@ -44,7 +43,6 @@ export function gradersForScenario(scenario: Scenario, options: ScenarioGraderOp
         provider,
         effort: options.judgeEffort,
         timeoutMs: options.judgeTimeoutMs,
-        showThresholds: options.showThresholds,
       }),
     )
   }

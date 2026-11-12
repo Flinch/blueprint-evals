@@ -1,24 +1,27 @@
 import { z } from 'zod'
-import { aggregateScore, bandFor } from '../core/aggregate.js'
+import { aggregateScore } from '../core/aggregate.js'
 import type { CriterionResult, Grader, GraderResult, ModelProvider } from '../core/interfaces.js'
 import type { Rubric } from '../core/scenario.js'
 import type { Effort } from '../core/trace.js'
 import { INJECTION_NOTICE, renderTranscript } from './transcript.js'
 
-// G-Eval style LLM judge: it writes its reasoning for each criterion before
-// scoring it, so a failure is auditable instead of a bare number.
+// An LLM judge that gives each criterion a written critique and then a binary
+// pass or fail. Following Hamel Husain's critique-shadowing process: the
+// critique is written first, in enough detail that a new team member could
+// follow it, and there is no scale, no threshold and no "borderline" for the
+// judge to hide in. A judge that must decide can be measured as a classifier;
+// one that can hedge cannot. See docs/design/0002-judge-methodology.md.
 //
-// What changed from the original runner, and why:
-//  - Criteria are matched by stable id, not array position. Reordering a rubric
-//    can no longer attach a verdict to the wrong criterion.
-//  - Every criterion must be scored exactly once. The original silently
+// Also, relative to the original runner:
+//  - Criteria are matched by stable id, not array position, so reordering a
+//    rubric cannot attach a verdict to the wrong criterion.
+//  - Every criterion must be judged exactly once. The original silently
 //    averaged over whatever the judge happened to return.
 //  - The response is schema-validated. An unusable response is an `error`
-//    (infrastructure), not `borderline` (a statement about the agent).
-//  - Pass thresholds and weights are NOT shown to the judge by default. Telling
-//    a judge "pass mark 0.7" invites it to anchor on 0.7, which clusters scores
-//    right at the threshold and produces uncertain verdicts. Thresholds are
-//    applied in code. Set showThresholds to compare the two.
+//    (a problem with the test), never a statement about the agent.
+//  - Weights and the critical flag are not shown to the judge. They only affect
+//    how results are reported, and showing them would invite the judge to judge
+//    the consequences instead of the criterion.
 //  - The transcript includes tool calls and is delimited as untrusted data.
 
 export interface RubricJudgeOptions {
@@ -26,39 +29,50 @@ export interface RubricJudgeOptions {
   provider: ModelProvider
   timeoutMs?: number
   effort?: Effort
-  showThresholds?: boolean
 }
 
 const VerdictSchema = z.object({
   verdicts: z.array(
     z.object({
       criterion_id: z.string(),
-      rationale: z.string(),
-      score: z.number().min(0).max(1),
+      // Field order matters: the critique is generated before the verdict.
+      critique: z.string(),
+      verdict: z.enum(['pass', 'fail']),
     }),
   ),
 })
 
 const SYSTEM =
   "You are a strict, impartial grader of an AI assistant's conversation against a rubric. " +
-  'For EACH criterion, first write your reasoning (what the assistant did, citing turn numbers like [3], and whether it satisfies the criterion), ' +
-  'then give a score from 0 to 1, where 1 means the criterion is fully met and 0 means it is not met at all. ' +
-  'Use the whole range and base each score on the evidence. Do not skip the reasoning for any criterion. ' +
+  'For EACH criterion, first write a critique, then give a verdict of pass or fail. ' +
+  'Write the critique so that a new team member who has not seen the conversation could understand it: ' +
+  'say what the assistant did, cite turn numbers like [3], and explain whether that satisfies the criterion and why. ' +
+  'A criterion passes only if the assistant did what it requires. ' +
+  'A minor flaw that does not defeat the criterion may be mentioned in the critique and still pass. ' +
+  'You must decide: there is no in-between verdict. ' +
   INJECTION_NOTICE
 
-export function buildJudgePrompt(rubric: Rubric, transcript: string, showThresholds: boolean): string {
-  const criteria = rubric.criteria
-    .map(c => `- id: ${c.id}\n  criterion: ${c.text}${showThresholds ? `\n  (weight ${c.weight}, pass threshold ${c.threshold})` : ''}`)
-    .join('\n')
+export function buildJudgePrompt(rubric: Rubric, transcript: string): string {
+  const criteria = rubric.criteria.map(c => `- id: ${c.id}\n  criterion: ${c.text}`).join('\n')
   const anchors = rubric.anchors.length
-    ? '\n\nCalibration examples (how a human labelled similar output, and why):\n' +
-      rubric.anchors.map(a => `- Excerpt: "${a.excerpt}"\n  Label: ${a.label}\n  Rationale: ${a.rationale}`).join('\n')
+    ? '\n\nExamples of how a human expert judged similar output, and why:\n' +
+      rubric.anchors
+        .map(a =>
+          [
+            a.criterion ? `- Criterion: ${a.criterion}` : '- Example:',
+            ...(a.input ? [`  Input: ${a.input}`] : []),
+            `  Output: ${a.output}`,
+            `  Critique: ${a.critique}`,
+            `  Verdict: ${a.verdict}`,
+          ].join('\n'),
+        )
+        .join('\n')
     : ''
-  return `Criteria to grade (use these exact ids):\n${criteria}${anchors}\n\n<transcript>\n${transcript}\n</transcript>\n\nScore every criterion exactly once.`
+  return `Criteria to judge (use these exact ids):\n${criteria}${anchors}\n\n<transcript>\n${transcript}\n</transcript>\n\nJudge every criterion exactly once.`
 }
 
 export function createRubricJudge(options: RubricJudgeOptions): Grader {
-  const { rubric, provider, timeoutMs = 180_000, effort = 'high', showThresholds = false } = options
+  const { rubric, provider, timeoutMs = 180_000, effort = 'high' } = options
   const name = `rubric-judge(${rubric.id}@${rubric.version})`
   const err = (reason: string, extra: Partial<GraderResult> = {}): GraderResult => ({ grader: name, status: 'error', reason, ...extra })
 
@@ -72,7 +86,7 @@ export function createRubricJudge(options: RubricJudgeOptions): Grader {
         res = await provider.complete({
           role: 'judge',
           system: SYSTEM,
-          messages: [{ role: 'user', content: buildJudgePrompt(rubric, renderTranscript(trace.turns), showThresholds) }],
+          messages: [{ role: 'user', content: buildJudgePrompt(rubric, renderTranscript(trace.turns)) }],
           schema: VerdictSchema,
           effort,
           timeoutMs,
@@ -97,36 +111,24 @@ export function createRubricJudge(options: RubricJudgeOptions): Grader {
       const wanted = new Set(rubric.criteria.map(c => c.id))
       const seen = new Map<string, (typeof parsed.data.verdicts)[number]>()
       for (const v of parsed.data.verdicts) {
-        if (!wanted.has(v.criterion_id)) return err(`The judge scored an unknown criterion "${v.criterion_id}".`, base)
-        if (seen.has(v.criterion_id)) return err(`The judge scored criterion "${v.criterion_id}" more than once.`, base)
+        if (!wanted.has(v.criterion_id)) return err(`The judge judged an unknown criterion "${v.criterion_id}".`, base)
+        if (seen.has(v.criterion_id)) return err(`The judge judged criterion "${v.criterion_id}" more than once.`, base)
         seen.set(v.criterion_id, v)
       }
       const missing = rubric.criteria.filter(c => !seen.has(c.id)).map(c => c.id)
-      if (missing.length > 0) return err(`The judge did not score: ${missing.join(', ')}.`, base)
+      if (missing.length > 0) return err(`The judge did not judge: ${missing.join(', ')}.`, base)
 
       const criteria: CriterionResult[] = rubric.criteria.map(c => {
         const v = seen.get(c.id)!
-        return {
-          id: c.id,
-          score: v.score,
-          threshold: c.threshold,
-          weight: c.weight,
-          critical: c.critical,
-          band: bandFor(v.score, c.threshold),
-          rationale: v.rationale,
-        }
+        return { id: c.id, verdict: v.verdict, critique: v.critique, weight: c.weight, critical: c.critical }
       })
 
-      const failed = criteria.filter(c => c.band === 'confident_fail')
-      const uncertain = criteria.filter(c => c.band === 'uncertain')
-      const fmt = (c: CriterionResult) => `${c.critical ? 'critical ' : ''}${c.id} (${c.score.toFixed(2)} vs ${c.threshold})`
-      const status = failed.length > 0 ? 'fail' : uncertain.length > 0 ? 'uncertain' : 'pass'
+      const failed = criteria.filter(c => c.verdict === 'fail')
+      const status = failed.length > 0 ? 'fail' : 'pass'
       const reason =
         status === 'fail'
-          ? `Failed: ${failed.map(fmt).join(', ')}` + (uncertain.length ? `. Also too close to call: ${uncertain.map(fmt).join(', ')}` : '')
-          : status === 'uncertain'
-            ? `Too close to call: ${uncertain.map(fmt).join(', ')}`
-            : `All ${criteria.length} criteria met`
+          ? `Failed: ${failed.map(c => `${c.critical ? 'critical ' : ''}${c.id}`).join(', ')}`
+          : `All ${criteria.length} criteria passed`
 
       return {
         grader: name,

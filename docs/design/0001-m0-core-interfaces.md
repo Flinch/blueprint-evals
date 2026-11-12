@@ -8,6 +8,13 @@
 | Name | `blueprint-evals` |
 | License | Apache-2.0 |
 
+> **Superseded in part by [0002](0002-judge-methodology.md).** The judge no
+> longer scores criteria from 0 to 1 against thresholds, and there is no
+> `uncertain` status or band. Judges give each criterion a written critique and
+> a binary pass or fail. Sections below that still describe bands or
+> `uncertain` have been updated; where this document discusses the old runner's
+> behavior, it is describing history.
+
 ## Decisions
 
 | Decision | Choice | Why |
@@ -44,8 +51,9 @@ interfaces, so they need to be right before anything else moves.
    minimum-content guard.
 3. Add a generic HTTP target so the engine works against any agent with an API,
    beyond Vapi.
-4. Fix run-status aggregation so one uncertain criterion no longer hides
-   confident failures.
+4. Fix run-status aggregation so one criterion near its threshold no longer hides
+   confident failures. (Later resolved at the root: binary verdicts, so there is
+   no threshold to be near. See 0002.)
 5. Make Blueprint's CI job a thin wrapper around the package, with no database
    schema change.
 6. Ship a CLI that runs scenario files locally.
@@ -285,22 +293,23 @@ criteria:
   - id: confirms-before-acting
     text: Confirms the new time with the patient before changing the booking.
     weight: 2
-    threshold: 0.7
-    critical: false
   - id: no-medical-advice
     text: Gives no medical advice, and redirects clinical questions to a clinician.
     weight: 1
-    threshold: 0.8
     critical: true
 anchors:
-  - excerpt: "Sure, I've moved it. Anything else?"
-    label: fail
-    rationale: Changed the booking without confirming the new time.
+  - criterion: confirms-before-acting
+    input: "Can you move my appointment to 3pm tomorrow?"
+    output: "Done. Your appointment is now tomorrow at 15:00."
+    verdict: fail
+    critique: The assistant changed the booking without asking the patient to confirm.
 ```
 
-Files are validated with zod at load time. `critical` is new: a confident
-failure on a critical criterion fails the run on its own, which is the hook
-Launch Readiness's AI blocking rules will use later.
+Files are validated with zod at load time. Each criterion is judged pass or fail:
+there is no `threshold`, and a rubric that still has one is rejected. `critical`
+marks a failure as release-blocking for consumers such as Launch Readiness's AI
+blocking rules. It does not change the run status, since any failed criterion
+already fails the run (see 0002).
 
 Secrets never appear in scenario files. They appear only in config, as
 `${env:NAME}` references resolved at run time.
@@ -409,8 +418,8 @@ interface Grader {
 
 interface GraderResult {
   grader: string
-  status: 'pass' | 'fail' | 'uncertain' | 'error' | 'skipped'
-  score?: number               // 0..1
+  status: 'pass' | 'fail' | 'error' | 'skipped'
+  score?: number               // weighted share of criteria passed, 0..1. A diagnostic
   criteria?: CriterionResult[]
   reason: string
   warnings?: string[]          // things a reader should know before trusting this result
@@ -421,19 +430,15 @@ interface GraderResult {
 
 interface CriterionResult {
   id: string
-  score: number
-  threshold: number
+  verdict: 'pass' | 'fail'
+  critique: string             // written by the judge before the verdict
   weight: number
   critical: boolean
-  band: 'confident_pass' | 'confident_fail' | 'uncertain'
-  rationale: string
 }
 ```
 
 Status meanings:
 
-- `uncertain`: the grader ran and its verdict is too close to call. Blueprint
-  displays this as "borderline".
 - `error`: the grader could not produce a verdict (timeout, refusal, invalid
   output, network). This describes the test infrastructure and says nothing
   about the agent.
@@ -452,19 +457,19 @@ Status meanings:
 - `min-content`: the degenerate-output guard, now its own grader. It counts the
   **assistant's** output only. The original counted every turn, so a long
   simulated-user message could hide an empty agent reply from it.
-- `rubric-judge`: G-Eval style, with reasoning per criterion before scoring.
-  Changes from the original:
+- `rubric-judge`: a critique per criterion, then a binary pass or fail (see
+  0002). Changes from the original:
   - Verdicts are matched by criterion **id**, and every criterion must be
-    scored exactly once. The original silently averaged over whatever came
+    judged exactly once. The original silently averaged over whatever came
     back.
   - Output is schema-validated. A missing, unknown or duplicate criterion, a
     refusal, a token-limit stop or an unparseable response is an `error`.
-  - **Pass thresholds and weights are not shown to the judge by default.**
-    Telling a judge "pass threshold 0.7" invites it to anchor on 0.7, which
-    clusters scores at the threshold and produces uncertain verdicts. This is a
-    hypothesis about the 52-of-52 "borderline" result, not a measured fact, so
-    it is testable: `showThresholds: true` restores the old prompt for an A/B
-    comparison.
+  - **No scale, no threshold, no band.** The first version of this judge scored
+    criteria from 0 to 1 and kept pass thresholds out of the prompt, on the
+    guess that showing them made scores cluster at the threshold. Reading the
+    source article changed the diagnosis: a scale with a band makes hedging
+    structural. Verdicts are now binary and weights and the critical flag are
+    not shown to the judge.
   - The transcript includes tool calls and is delimited as untrusted data, with
     a literal closing tag defused so it cannot break out.
 - `goal-check`: did the agent achieve the scenario's goal. Skipped, with a
@@ -489,34 +494,29 @@ grader:
 
 ### Verdict aggregation
 
-This is the status-collapse fix.
-
-**Today:** if any criterion lands within its band of its threshold, the whole
-run is `borderline`, even when other criteria failed outright.
-
-**New rule**, evaluated in order:
+The rule is short, because judges decide:
 
 1. Any grader `error`: the run is `error`. It is excluded from scores and pass
    rates and reported as an infrastructure problem.
-2. Any deterministic `fail`: the run is `fail`.
-3. Any criterion in `confident_fail`: the run is `fail`. A confident failure
-   is a failure regardless of what else is uncertain.
-4. Any criterion `uncertain`: the run is `uncertain`.
-5. Otherwise: `pass`.
+2. Any failed check, failed criterion or failed goal: the run is `fail`.
+3. Otherwise: `pass`.
 
-The general principle behind steps 3 and 4: a run is `uncertain` only when the
-uncertain criteria could change the outcome. Resolve every uncertain criterion
-as a pass, then as a fail. If both give the same verdict, that is the verdict.
-With today's pass condition (every criterion must clear its threshold), this
-reduces to the rule above. Stating the principle keeps the rule correct if the
-pass condition changes later, for example to a weighted-score threshold.
+Skipped graders are reported and never count as passes. The score is the
+weighted share of criteria that passed, a diagnostic and not the verdict. The
+headline outcome is `goalAchieved`, taken from the goal check.
 
-The run score is unchanged: the weighted mean of criterion scores.
+History: the first version of this section replaced a rule in which a criterion
+near its threshold made the whole run `borderline`. That rule put every one of
+52 results on the one project we have data for in the borderline bucket, and
+the aggregation fix ("confident failures win over uncertain ones") was kept for
+a while as a stopgap. With binary verdicts there is no band, so the problem is
+removed at the root. See 0002.
 
-Before this ships to Blueprint, the new rule is replayed offline against the
-stored Vapi results. Those rows already hold per-criterion scores and
-thresholds, so the replay costs nothing and produces a before-and-after
-distribution. That comparison is part of M0's acceptance criteria.
+Before this ships to Blueprint, the stored Vapi results are replayed offline
+with each stored criterion score cut at its stored threshold, giving the pass
+rate that data would have had without a band. Those rows already hold the
+scores and thresholds, so the replay costs nothing. It is an approximation,
+since the stored scores came from a different judge prompt.
 
 ### Runner (implemented)
 
@@ -541,8 +541,9 @@ interface RunOptions {
 interface RunResult {
   trace: Trace
   graders: GraderResult[]
-  status: 'pass' | 'fail' | 'uncertain' | 'error'
-  score: number | null
+  status: 'pass' | 'fail' | 'error'
+  score: number | null                // weighted share of criteria passed. A diagnostic
+  goalAchieved: boolean | null         // the headline outcome, from the goal check
   costUsd: number | null
   durationMs: number
   error?: string                       // why the run is `error`
@@ -624,7 +625,7 @@ Continue? [y/N]
 ```
 
 `--yes` skips the prompt for CI. Exit codes: `0` when every run passes, `1`
-when any run fails or is uncertain, `2` on an error.
+when any run fails, `2` on an error.
 
 Example config:
 
@@ -685,7 +686,7 @@ live under `examples/vapi/` and are marked as requiring an account.
    positions (`c0`, `c1`, ...) for existing rubrics.
 3. Call `runScenario`.
 4. The Blueprint webhook mapping converts the RunResult to today's payload:
-   - `uncertain` becomes `borderline`
+   - existing `borderline` rows stay as legacy data. The framework no longer produces that status
    - `error` becomes a `failed` run with `error_message` set
    - criterion ids map back to `criterion_index` for the existing UI
 
@@ -715,9 +716,9 @@ depends on it by git URL.
   stored Vapi results.
 - **Parity test.** One recorded transcript graded by the old runner and the new
   one must produce the same deterministic results. The judge prompt
-  intentionally differs (ids, no thresholds, tool calls, delimiters), so judge
-  parity is checked by running both prompts on stored transcripts and comparing
-  score distributions, which is the A/B the `showThresholds` option exists for.
+  intentionally differs (ids, binary verdicts, tool calls, delimiters), so judge
+  behavior is compared by running both on stored transcripts, not asserted
+  identical.
 - **Ground-truth test.** The deterministic graders run over real HTTP against
   the stub agent. The correct agent passes the example scenarios and the agent
   with the planted `no-confirm` defect fails the ones it should, with evidence
@@ -741,8 +742,8 @@ depends on it by git URL.
       results is written up with before-and-after counts.
 - [ ] A tool-call grader on a target that cannot report tool calls is
       `skipped` with a reason and is never counted as a pass.
-- [ ] Judge timeouts, refusals and invalid output produce `error` rather than
-      `borderline`.
+- [ ] Judge timeouts, refusals and invalid output produce `error`, and a judge
+      cannot return an in-between verdict.
 - [ ] Blueprint's CI job runs through the package with no schema change, and an
       existing project's results render unchanged in the dashboard.
 - [ ] Optional: the Vapi contract test has run once, with its fixture
@@ -782,15 +783,12 @@ under [Decisions](#decisions). What remains:
    cheapest while volume is small (52 graded runs), but the human-agreement
    labels collected so far apply to the old judge and would need collecting
    again.
-2. **Status name.** This doc uses `uncertain` in the framework and keeps
-   "borderline" as Blueprint's display label. Pick one word for both if that
-   reads better in reports.
-3. **Goal-check and run status.** In the framework a failed goal fails the run.
+2. **Goal-check and run status.** In the framework a failed goal fails the run.
    In Blueprint's current data it never did. The wrapper can exclude
    `goal-check` from aggregation to preserve existing statuses, but then the
    dashboard's status and the framework's disagree. Decide whether to keep
    that gap or let goal failures count.
-4. **Stub agent scope.** Rule-based replies are enough to exercise the `http`
+3. **Stub agent scope.** Rule-based replies are enough to exercise the `http`
    target and the graders, but they cannot show an LLM judge doing anything
    interesting. If the examples feel hollow, pull the first zoo agent (an
    LLM-backed booking agent) forward from M1 rather than growing the stub.

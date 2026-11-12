@@ -8,7 +8,7 @@ import { INJECTION_NOTICE, renderTranscript } from './transcript.js'
 // for a scenario with no rubric, and re-grading it never means re-sending the
 // whole rubric. Skipped when the scenario has no goal.
 
-const GoalSchema = z.object({ achieved: z.boolean(), rationale: z.string() })
+const GoalSchema = z.object({ achieved: z.boolean(), critique: z.string() })
 
 const SYSTEM =
   'You decide whether an AI assistant achieved a stated goal by the end of a conversation. ' +
@@ -60,7 +60,7 @@ export function createGoalCheck(options: GoalCheckOptions): Grader {
       return {
         grader: name,
         status: parsed.data.achieved ? 'pass' : 'fail',
-        reason: parsed.data.rationale,
+        reason: parsed.data.critique,
         ...base,
       }
     },

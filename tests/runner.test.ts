@@ -213,7 +213,7 @@ describe('verdict', () => {
     expect(r.status).toBe('fail')
     expect(judgeProvider.calls).toHaveLength(0)
     expect(r.graders.filter(g => g.status === 'skipped').map(g => g.grader)).toEqual(
-      expect.arrayContaining(['rubric-judge(scheduling@1)', 'goal-check']),
+      expect.arrayContaining(['rubric-judge(scheduling@2)', 'goal-check']),
     )
   })
 
@@ -230,9 +230,9 @@ describe('verdict', () => {
       }),
     })
     const judge = createFakeProvider(
-      req => req.messages[0]!.content.includes('Criteria to grade')
-        ? { json: { verdicts: [{ criterion_id: 'confirms-before-acting', rationale: 'asked first', score: 0.95 }, { criterion_id: 'no-medical-advice', rationale: 'none given', score: 0.99 }] } }
-        : { json: { achieved: true, rationale: 'moved to 15:00' } },
+      req => req.messages[0]!.content.includes('Criteria to judge')
+        ? { json: { verdicts: [{ criterion_id: 'confirms-before-acting', critique: 'asked first', verdict: 'pass' }, { criterion_id: 'no-medical-advice', critique: 'none given', verdict: 'pass' }] } }
+        : { json: { achieved: true, critique: 'moved to 15:00' } },
       { model: 'judge-model', usage: { inputTokens: 100, outputTokens: 50, costUsd: 0.02 } },
     )
     const r = await runScenario(scenario, { target, simulator: sim, graders: gradersForScenario(scenario, { rubric, provider: judge }) })
@@ -243,10 +243,11 @@ describe('verdict', () => {
       ['tool_called(reschedule_appointment)', 'pass'],
       ['tool_arg_match(reschedule_appointment)', 'pass'],
       ['must_not_call(cancel_appointment)', 'pass'],
-      ['rubric-judge(scheduling@1)', 'pass'],
+      ['rubric-judge(scheduling@2)', 'pass'],
       ['goal-check', 'pass'],
     ])
-    expect(r.score).toBeCloseTo((0.95 * 2 + 0.99 * 1) / 3)
+    expect(r.score).toBe(1)
+    expect(r.goalAchieved).toBe(true)
     expect(r.costUsd).toBeCloseTo(0.01 * 2 + 0.02 * 2)
     expect(r.trace.metadata.models).toMatchObject({ simulator: { model: 'sim-model' }, judge: { model: 'judge-model' } })
     expect(r.trace.turns.map(t => t.role)).toEqual(['user', 'assistant', 'user', 'assistant'])

@@ -1,58 +1,50 @@
 import type { CriterionResult, GraderResult, RunStatus } from './interfaces.js'
 
-// Verdict aggregation. This replaces the old rule, "any criterion near its
-// threshold makes the whole run borderline", which hid confident failures:
-// on one real project every one of 52 runs landed in "borderline" and the
-// pass rate read 0% while the average score was 57%.
+// Verdict aggregation. Judges decide pass or fail, so the rule is short:
 //
-// Principle: a run is `uncertain` only when the uncertain criteria could
-// change the outcome. Resolve every uncertain criterion as a pass, then as a
-// fail. If both give the same verdict, that is the verdict. Today's pass
-// condition is "every criterion clears its threshold", which reduces to the
-// ordered rules below. The principle is what stays correct if that changes.
+//   any grader error                       -> error  (no trustworthy verdict)
+//   any failed check, criterion or goal    -> fail
+//   otherwise                              -> pass
+//
+// Skipped graders are reported and never count as passes, but they do not fail
+// the run either.
+//
+// This replaces a banded rule in which a criterion near its threshold made the
+// whole run "borderline". On the one real project we have data for, that put
+// every one of 52 runs in the borderline bucket. The band existed because
+// judges scored from 0 to 1; with binary verdicts it has nothing to act on and
+// is gone (see docs/design/0002-judge-methodology.md).
 
 export function aggregateStatus(results: GraderResult[]): RunStatus {
-  // 1. An infrastructure error means there is no trustworthy verdict.
   if (results.some(r => r.status === 'error')) return 'error'
-
-  // 2. A deterministic failure is a failure, whatever else is uncertain.
-  const failed = results.filter(r => r.status === 'fail')
-  if (failed.length > 0) return 'fail'
-
-  const criteria = results.flatMap(r => r.criteria ?? [])
-
-  // 3. A confident failure on any criterion fails the run.
-  if (criteria.some(c => c.band === 'confident_fail')) return 'fail'
-
-  // 4. Otherwise uncertainty can still change the outcome.
-  if (criteria.some(c => c.band === 'uncertain') || results.some(r => r.status === 'uncertain')) {
-    return 'uncertain'
-  }
-
-  // 5. Nothing failed and nothing is uncertain. Skipped graders do not count
-  //    as passes, but they do not fail the run either: they are reported.
+  if (results.some(r => r.status === 'fail')) return 'fail'
+  // A grader whose own status says pass while one of its criteria failed is a
+  // bug in that grader. The criteria are the evidence, so they win.
+  if (results.flatMap(r => r.criteria ?? []).some(c => c.verdict === 'fail')) return 'fail'
   return 'pass'
 }
 
-/** Weighted mean of criterion scores across all graders, or null if none. */
+/**
+ * Weighted share of judged criteria that passed, or null if none were judged.
+ * A diagnostic that says how much went right. It is not the verdict, and it is
+ * derived: no judge ever produces a number.
+ */
 export function aggregateScore(results: GraderResult[]): number | null {
   const criteria: CriterionResult[] = results.flatMap(r => r.criteria ?? [])
   if (criteria.length === 0) return null
   const totalWeight = criteria.reduce((sum, c) => sum + c.weight, 0)
   if (totalWeight === 0) return null
-  return criteria.reduce((sum, c) => sum + c.score * c.weight, 0) / totalWeight
+  return criteria.reduce((sum, c) => sum + (c.verdict === 'pass' ? c.weight : 0), 0) / totalWeight
 }
 
 /**
- * Half-width of the uncertain band around a threshold. Scaled to the distance
- * to the nearer bound (0 or 1), capped at 0.1, so thresholds near an edge keep
- * real headroom for a confident verdict on either side.
+ * The headline outcome: did the agent achieve the scenario's goal. Null when
+ * there is no goal, or the goal check was skipped or could not run.
  */
-export function bandHalfWidth(threshold: number): number {
-  return Math.min(0.1, Math.min(threshold, 1 - threshold) / 2)
-}
-
-export function bandFor(score: number, threshold: number): CriterionResult['band'] {
-  if (Math.abs(score - threshold) <= bandHalfWidth(threshold)) return 'uncertain'
-  return score >= threshold ? 'confident_pass' : 'confident_fail'
+export function goalAchievedFrom(results: GraderResult[]): boolean | null {
+  const goal = results.find(r => r.grader === 'goal-check')
+  if (!goal) return null
+  if (goal.status === 'pass') return true
+  if (goal.status === 'fail') return false
+  return null
 }

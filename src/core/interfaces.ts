@@ -75,32 +75,28 @@ export interface ModelProvider {
 // ----------------------------------------------------------------- Grader
 
 /**
- *  - pass / fail: the grader ran and reached a verdict.
- *  - uncertain: the grader ran and the verdict is too close to call.
- *    Blueprint displays this as "borderline".
+ *  - pass / fail: the grader ran and reached a verdict. A judge must decide:
+ *    there is no "uncertain" (see docs/design/0002-judge-methodology.md).
  *  - error: the grader could not produce a verdict (timeout, refusal,
  *    invalid output, network). Describes the test infrastructure, not the agent.
  *  - skipped: a requirement was unmet. Always carries a reason. A skipped
  *    check never counts as a pass.
  */
-export type GraderStatus = 'pass' | 'fail' | 'uncertain' | 'error' | 'skipped'
-
-export type CriterionBand = 'confident_pass' | 'confident_fail' | 'uncertain'
+export type GraderStatus = 'pass' | 'fail' | 'error' | 'skipped'
 
 export interface CriterionResult {
   id: string
-  score: number
-  threshold: number
+  verdict: 'pass' | 'fail'
+  /** The judge's written reasoning, produced before the verdict. */
+  critique: string
   weight: number
   critical: boolean
-  band: CriterionBand
-  rationale: string
 }
 
 export interface GraderResult {
   grader: string
   status: GraderStatus
-  /** 0..1 */
+  /** Weighted share of criteria passed, 0..1. A diagnostic, not the verdict. */
   score?: number
   criteria?: CriterionResult[]
   reason: string
@@ -133,14 +129,16 @@ export interface Reporter {
 
 // ----------------------------------------------------------------- Runner
 
-export type RunStatus = 'pass' | 'fail' | 'uncertain' | 'error'
+export type RunStatus = 'pass' | 'fail' | 'error'
 
 export interface RunResult {
   trace: Trace
   graders: GraderResult[]
   status: RunStatus
-  /** Weighted mean of criterion scores, or null if nothing produced one. */
+  /** Weighted share of criteria passed, or null if no criteria were judged. A diagnostic. */
   score: number | null
+  /** The headline outcome, from the goal check. Null when there is no goal or the check could not run. */
+  goalAchieved: boolean | null
   costUsd: number | null
   durationMs: number
   /** Why the run is `error`: a target, simulator or grader failure, or a blown budget. */

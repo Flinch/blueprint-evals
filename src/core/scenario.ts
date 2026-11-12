@@ -26,21 +26,39 @@ export const CheckSchema = z.discriminatedUnion('type', [
 ])
 export type Check = z.infer<typeof CheckSchema>
 
-export const CriterionSchema = z.object({
-  id,
-  text: z.string().min(1),
-  weight: z.number().positive().default(1),
-  threshold: z.number().min(0).max(1).default(0.7),
-  /** A confident failure on a critical criterion fails the run on its own. */
-  critical: z.boolean().default(false),
-})
+// A criterion is judged pass or fail, with a critique. There is no numeric
+// score and no threshold: a judge that is allowed to hedge cannot be measured
+// as a classifier (see docs/design/0002-judge-methodology.md). `.strict()` so a
+// rubric that still carries a `threshold` is rejected loudly instead of having
+// it silently ignored, since its meaning changed.
+export const CriterionSchema = z
+  .object({
+    id,
+    text: z.string().min(1),
+    /** Weight in the derived score. It does not change the verdict. */
+    weight: z.number().positive().default(1),
+    /**
+     * Marks a failure as release-blocking for consumers such as Launch
+     * Readiness. A failed critical criterion fails the run like any other.
+     */
+    critical: z.boolean().default(false),
+  })
+  .strict()
 export type Criterion = z.infer<typeof CriterionSchema>
 
-export const AnchorSchema = z.object({
-  excerpt: z.string(),
-  label: z.enum(['pass', 'fail']),
-  rationale: z.string(),
-})
+// A few-shot example in the judge's prompt, in the post's format: the input,
+// the output, the critique and the verdict. A response is often only wrong
+// relative to what was asked, which is why the input is here.
+export const AnchorSchema = z
+  .object({
+    /** The criterion this illustrates. Omit for an example of the rubric as a whole. */
+    criterion: z.string().optional(),
+    input: z.string().optional(),
+    output: z.string(),
+    verdict: z.enum(['pass', 'fail']),
+    critique: z.string().min(1),
+  })
+  .strict()
 export type Anchor = z.infer<typeof AnchorSchema>
 
 export const RubricSchema = z
@@ -57,6 +75,11 @@ export const RubricSchema = z
         ctx.addIssue({ code: 'custom', path: ['criteria', i, 'id'], message: `duplicate criterion id "${c.id}"` })
       }
       seen.add(c.id)
+    })
+    rubric.anchors.forEach((a, i) => {
+      if (a.criterion !== undefined && !seen.has(a.criterion)) {
+        ctx.addIssue({ code: 'custom', path: ['anchors', i, 'criterion'], message: `anchor refers to unknown criterion "${a.criterion}"` })
+      }
     })
   })
 export type Rubric = z.infer<typeof RubricSchema>

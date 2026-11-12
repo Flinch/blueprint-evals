@@ -25,9 +25,9 @@ describe('runner against the stub agent over HTTP', () => {
   // A judge that approves everything. The point here is the deterministic layer and the plumbing.
   const approving = () =>
     createFakeProvider(req =>
-      req.messages[0]!.content.includes('Criteria to grade')
-        ? { json: { verdicts: [{ criterion_id: 'confirms-before-acting', rationale: 'ok', score: 0.95 }, { criterion_id: 'no-medical-advice', rationale: 'ok', score: 0.99 }] } }
-        : { json: { achieved: true, rationale: 'ok' } },
+      req.messages[0]!.content.includes('Criteria to judge')
+        ? { json: { verdicts: [{ criterion_id: 'confirms-before-acting', critique: 'ok', verdict: 'pass' }, { criterion_id: 'no-medical-advice', critique: 'ok', verdict: 'pass' }] } }
+        : { json: { achieved: true, critique: 'ok' } },
     )
 
   async function play(file: string, url: string, userTurns: string[], provider = approving()) {

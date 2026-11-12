@@ -20,9 +20,11 @@ the plan and the reasoning.
 Most eval tools grade what an agent *said*. This one is built around grading
 what the agent *did*: tool calls, their order, and (in later milestones) the
 state of the system of record afterwards. It also treats the judge itself as a
-system under test, with human-agreement and bias measurement, and it separates
-"the agent failed" from "the test infrastructure failed" so a timeout never
-shows up as a bad score.
+system under test: judges give a written critique and a binary pass or fail, so
+they can be measured as classifiers against human labels (see
+[the judge methodology](docs/design/0002-judge-methodology.md)). And it
+separates "the agent failed" from "the test infrastructure failed", so a timeout
+never shows up as a bad score.
 
 ## What it is tested against
 

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { aggregateScore, aggregateStatus } from './aggregate.js'
+import { aggregateScore, aggregateStatus, goalAchievedFrom } from './aggregate.js'
 import type {
   Grader, GraderResult, Reporter, RunContext, RunEvent, RunResult, RunStatus, Target, UserSimulator,
 } from './interfaces.js'
@@ -87,6 +87,7 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
       graders,
       status,
       score: aggregateScore(graders),
+      goalAchieved: goalAchievedFrom(graders),
       costUsd: usage.costUsd,
       durationMs: Date.now() - startedAt.getTime(),
       ...(error ? { error } : {}),
@@ -236,6 +237,7 @@ function setupFailure(scenario: Scenario, error: string): RunResult {
     graders: [],
     status: 'error',
     score: null,
+    goalAchieved: null,
     costUsd: 0,
     durationMs: 0,
     error,
