@@ -7,6 +7,11 @@ export interface RunGradersOptions {
   shortCircuit?: boolean
   /** Called as each result lands, for live reporting. */
   onResult?: (result: GraderResult) => void | Promise<void>
+  /**
+   * Checked before each grader. A returned string stops that grader from
+   * running and becomes its `error` reason (used to enforce a cost budget).
+   */
+  guard?: () => string | undefined
 }
 
 const UNVERIFIED_WARNING =
@@ -31,7 +36,7 @@ export async function runGraders(
   ctx: RunContext,
   options: RunGradersOptions = {},
 ): Promise<GraderResult[]> {
-  const { shortCircuit = true, onResult } = options
+  const { shortCircuit = true, onResult, guard } = options
   const deterministic = graders.filter(g => g.kind === 'deterministic')
   const rest = graders.filter(g => g.kind !== 'deterministic')
   const results: GraderResult[] = []
@@ -42,6 +47,8 @@ export async function runGraders(
   }
 
   async function runOne(g: Grader): Promise<GraderResult> {
+    const stop = guard?.()
+    if (stop) return { grader: g.name, status: 'error', reason: stop }
     if (g.requires?.toolCalls && trace.target.toolCalls === 'none') {
       return {
         grader: g.name,

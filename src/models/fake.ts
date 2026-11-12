@@ -1,4 +1,5 @@
 import type { CompleteRequest, CompleteResponse, ModelProvider } from '../core/interfaces.js'
+import type { Usage } from '../core/trace.js'
 
 // A scripted provider for tests. No network, no cost, deterministic.
 //
@@ -18,7 +19,7 @@ export interface FakeProvider extends ModelProvider {
 
 export function createFakeProvider(
   script: FakeReply | FakeReply[] | ((req: CompleteRequest, call: number) => FakeReply),
-  opts: { model?: string; servedBy?: string } = {},
+  opts: { model?: string; servedBy?: string; usage?: Usage } = {},
 ): FakeProvider {
   const calls: CompleteRequest[] = []
   const model = opts.model ?? 'fake-model'
@@ -32,7 +33,7 @@ export function createFakeProvider(
 
       if ('error' in reply) throw reply.error instanceof Error ? reply.error : new Error(reply.error)
 
-      const usage = { inputTokens: 100, outputTokens: 50, costUsd: 0 }
+      const usage = opts.usage ?? { inputTokens: 100, outputTokens: 50, costUsd: 0 }
       const modelRef = { provider: 'fake', model, ...(opts.servedBy ? { servedBy: opts.servedBy } : {}) }
 
       if ('refusal' in reply) return { text: '', usage, model: modelRef, stopReason: 'refusal' }

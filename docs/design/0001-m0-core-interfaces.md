@@ -311,12 +311,19 @@ Decides the simulated user's next turn.
 
 ```ts
 interface UserSimulator {
-  next(ctx: { scenario: Scenario; turns: Turn[] }): Promise<{ message: string | null; usage: Usage }>
+  next(ctx: { scenario: Scenario; turns: Turn[] }): Promise<{ message: string | null; usage: Usage; model?: ModelRef }>
 }
 ```
 
-- `llm-persona`: a port of `buildPersonaPrompt`. Returns `null` when the persona
-  ends the conversation.
+- `llm-persona` (implemented): a port of `buildPersonaPrompt`. Returns `null`
+  when the persona ends the conversation, and when the scenario has no persona
+  to continue from. Changes from the original: the answer is structured
+  (`{action: 'say' | 'end', message}`) instead of a bare string with an
+  `[END_CONVERSATION]` marker, so stray quotes or commentary cannot leak into
+  the user's turn; and the agent's replies are marked untrusted, with a literal
+  closing tag defused, so an agent that says "ignore your instructions" cannot
+  talk the simulator out of its role. An invalid turn, an empty message or a
+  refusal is an error, never an invented turn.
 - `scripted`: a fixed list of user turns. Useful for regression cases and for
   the framework's tests.
 
@@ -511,22 +518,24 @@ stored Vapi results. Those rows already hold per-criterion scores and
 thresholds, so the replay costs nothing and produces a before-and-after
 distribution. That comparison is part of M0's acceptance criteria.
 
-### Runner
+### Runner (implemented)
 
 ```ts
 function runScenario(scenario: Scenario, opts: RunOptions): Promise<RunResult>
-function runSuite(scenarios: Scenario[], opts: RunOptions): Promise<RunResult[]>
+function runSuite(
+  scenarios: Scenario[],
+  optionsFor: (scenario: Scenario) => RunOptions | Promise<RunOptions>,
+): Promise<RunResult[]>
 
 interface RunOptions {
   target: Target
-  simulator?: UserSimulator
+  simulator?: UserSimulator            // required when the scenario has a persona
   graders: Grader[]
-  provider: ModelProvider
   reporters?: Reporter[]
   budget?: { maxCostUsd?: number; maxTurns?: number }
-  timeouts?: { simulatorMs?: number; judgeMs?: number }   // defaults 60_000 and 180_000, as today
-  trials?: 1                                              // widened in M2
-  shortCircuit?: boolean
+  shortCircuit?: boolean               // default true
+  metadata?: { promptVersion?: string; targetVersion?: string; tags?: string[] }
+  signal?: AbortSignal
 }
 
 interface RunResult {
@@ -536,12 +545,47 @@ interface RunResult {
   score: number | null
   costUsd: number | null
   durationMs: number
+  error?: string                       // why the run is `error`
+  warnings: string[]                   // grader warnings and reporter failures
 }
 ```
 
-Exceeding the budget stops the run with status `error` and a reason that says
-which limit was hit. M0 runs scenarios one at a time. Concurrency arrives with
-trials in M2.
+Differences from the first draft of this section:
+
+- **No `provider` and no `timeouts` on RunOptions.** The simulator and the
+  graders are built with their own provider, effort and timeouts, so the runner
+  has nothing to configure there. It learns which models ran from what they
+  report, and records them in the trace.
+- **`runSuite` takes a function.** Each scenario has its own target, simulator
+  and graders (its target name, its rubric), so the options depend on the
+  scenario.
+- **`trials` is gone from RunOptions.** The scenario schema still accepts only
+  `trials: 1`. Repeated trials arrive with M2.
+
+Rules the runner enforces:
+
+- **It does not throw.** A target, simulator or grader failure, a blown budget
+  or a cancellation comes back as an `error` result with the partial trace and a
+  reason, so one bad scenario cannot take a suite down. A scenario that cannot
+  be set up inside `runSuite` is that scenario's error.
+- **A run with no graders is an `error`,** since a test with no assertions
+  passing is a false pass. A persona scenario with no simulator is also an
+  `error`, caught before the target is touched.
+- **Conversation.** The seed message opens the first turn if there is one.
+  After that the simulator speaks until it ends the conversation, the
+  scenario's `max_turns` is reached, or `budget.maxTurns` (if lower) is.
+  Single-shot scenarios record the input as a user turn and the reply as an
+  assistant turn.
+- **Budget.** Spend is checked after every simulator call and before every
+  grader. Past the limit, the run stops as an `error` naming the limit. A
+  budget with an unpriced model is also an `error` ("spend is unknown"), since
+  pretending to enforce it would be worse. If the last grader is what tips it
+  over, the verdict is kept with a warning, because the spend already happened
+  and the verdict is valid.
+- **Reporters** receive `run:start`, `turn`, `grader:done` and `run:end`
+  (also on error). A reporter that throws cannot fail the run. It adds a
+  warning.
+- **Scenarios run one at a time.** Concurrency arrives with trials in M2.
 
 ### Reporters and events
 

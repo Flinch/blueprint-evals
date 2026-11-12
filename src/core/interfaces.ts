@@ -40,7 +40,7 @@ export interface Target<Session = unknown> {
 
 export interface UserSimulator {
   /** message is null when the simulated user ends the conversation. */
-  next(ctx: { scenario: Scenario; turns: Turn[] }): Promise<{ message: string | null; usage: Usage }>
+  next(ctx: { scenario: Scenario; turns: Turn[] }): Promise<{ message: string | null; usage: Usage; model?: ModelRef }>
 }
 
 // --------------------------------------------------------- ModelProvider
@@ -143,4 +143,8 @@ export interface RunResult {
   score: number | null
   costUsd: number | null
   durationMs: number
+  /** Why the run is `error`: a target, simulator or grader failure, or a blown budget. */
+  error?: string
+  /** Grader warnings and reporter failures, de-duplicated. */
+  warnings: string[]
 }

@@ -8,9 +8,11 @@ judges, and reports a verdict you can audit.
 
 **Status:** early. Implemented and tested: the interfaces, the verdict
 aggregation rule, the `http` target, the stub agent, the graders
-(deterministic checks, the rubric judge, goal check) and the Anthropic model
-provider (tested against a fake client; an opt-in live test is included). The
-simulator, runner and CLI are next. See the [M0 design doc](docs/design/0001-m0-core-interfaces.md) for
+(deterministic checks, the rubric judge, goal check), the Anthropic model
+provider (tested against a fake client; an opt-in live test is included), the
+persona and scripted simulators, the scenario loader and the runner. The
+reporters and the CLI are next, so `evals run` does not exist yet, but
+`runScenario` works end to end from code. See the [M0 design doc](docs/design/0001-m0-core-interfaces.md) for
 the plan and the reasoning.
 
 ## Why another eval tool
