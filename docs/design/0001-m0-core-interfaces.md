@@ -2,10 +2,21 @@
 
 | | |
 |---|---|
-| Status | Draft |
+| Status | Draft, decisions recorded below |
 | Milestone | M0 |
 | Date | 2026-11-12 |
-| Working name | `blueprint-evals` (see [Open questions](#open-questions)) |
+| Name | `blueprint-evals` |
+| License | Apache-2.0 |
+
+## Decisions
+
+| Decision | Choice | Why |
+|---|---|---|
+| Name | `blueprint-evals` | Ties the framework to Blueprint's credibility |
+| License | Apache-2.0 | Patent grant, common for developer tooling |
+| Distribution | Git dependency until M2, then reconsider npm | The interfaces should survive real use before they are published as a stable package. `package.json` is marked `private` to prevent an accidental npm publish |
+| Reference target | Agents we control (a stub agent in M0, the bug zoo from M1). Vapi is one adapter among several | We need ground truth. See [What the framework is tested against](#what-the-framework-is-tested-against) |
+| Repository publication | Held until the owner says go | Nothing is public yet |
 
 ## Summary
 
@@ -63,6 +74,7 @@ Facts about the current runner that shape this design:
 | Run status is `anyBorderline ? 'borderline' : ...`. One criterion near its threshold overrides everything, including confident failures. On the Vapi project (2026-09) all 52 runs landed in `borderline` | New aggregation rule, below |
 | Criteria are referenced by array index (`criterion_index`) | Criteria get stable ids. Reordering a rubric no longer changes which verdict belongs to which criterion |
 | Vapi tool-call extraction is defensive and unconfirmed (`reply.toolCalls \|\| reply.tool_calls \|\| []`) | If the field name is wrong, `toolCalls` is always empty. `must_not_call` then always passes and `tool_called` always fails, silently. Targets now declare whether they can report tool calls, and graders that depend on them are skipped with a reason when they cannot |
+| The only external target today is Vapi's public sample agent (Riley), which Vapi owns and can change | It cannot be the reference target: defects cannot be planted in it, scores can drift for reasons outside the framework, and running it needs a paid account. It stays as one adapter and an integration check |
 | Results go to `POST /ai-eval-runs` with progress posts during the conversation | A webhook reporter reproduces this exactly |
 
 ## Package
@@ -75,14 +87,14 @@ Facts about the current runner that shape this design:
 ```
 src/
   core/        types, schemas (zod), runner, aggregation, events
-  targets/     vapi-chat, http, fake
+  targets/     http, fake, vapi-chat
   simulators/  llm-persona, scripted
   graders/     deterministic, rubric-judge, goal-check, min-content
   models/      anthropic provider, fake provider, pricing
   reporters/   console, json, webhook
   cli/         run, validate
 docs/design/
-examples/      synthetic scenarios and an example config
+examples/      stub-agent, synthetic scenarios and an example config (optional Vapi example under examples/vapi/)
 ```
 
 - **Runtime dependencies:** `@anthropic-ai/sdk`, `zod`, `yaml`. Nothing else
@@ -200,11 +212,15 @@ calls:
 - `verified`: a contract test has confirmed the shape (see
   [Testing](#testing-the-framework)).
 
-The Vapi target starts at `reported` until its contract test passes.
+The Vapi target starts at `reported` until its contract test passes. That test
+is optional for M0 (it needs a paid account), and `vapi-chat` ships as
+`reported` if it has not run.
 
 **M0 targets**
 
-1. `vapi-chat`: a port of `vapiChatTurn`. The session is Vapi's chat id.
+1. `vapi-chat`: a port of `vapiChatTurn`. The session is Vapi's chat id. It is
+   one adapter and an integration check, and it is not the framework's
+   reference target.
 2. `http`: a generic adapter for any agent with an HTTP endpoint. Requests are
    built from a template, and the reply text, tool calls and session id are
    read from the response using JSON paths:
@@ -243,7 +259,7 @@ Scenarios are versioned YAML files, reviewable like test code.
 ```yaml
 id: booking-reschedule-tomorrow
 version: 3
-target: riley
+target: stub-agent
 mode: conversational          # or single_shot
 persona: >
   A patient who wants to move tomorrow's 10am appointment to 3pm. Polite,
@@ -499,13 +515,13 @@ strip personal data from transcripts before they are written anywhere.
 
 ```
 evals validate scenarios/
-evals run scenarios/riley/ --config evals.config.yaml
+evals run examples/scenarios/ --config examples/evals.config.yaml
 ```
 
 Before running, the CLI prints what it will do and the maximum it could cost:
 
 ```
-3 scenarios against "riley", 1 trial each, up to 10 turns
+3 scenarios against "stub-agent", 1 trial each, up to 10 turns
 Simulator and judge: claude-opus-5-5. Estimated maximum cost: $0.84
 Continue? [y/N]
 ```
@@ -522,11 +538,46 @@ models:
 pricing:
   claude-opus-5-5: { inputPerMTok: 4.00, outputPerMTok: 20.00 }
 targets:
-  riley:
-    kind: vapi-chat
-    apiKey: "${env:VAPI_API_KEY}"
-    assistantId: "${env:VAPI_ASSISTANT_ID}"
+  stub-agent:
+    kind: http
+    url: http://localhost:4010/chat
+    request: { body: { message: "{{input.text}}", conversation_id: "{{session}}" } }
+    response: { text: "$.reply", session: "$.conversation_id" }
+    toolCalls: reported
+  # Optional, needs a Vapi account:
+  # vapi-riley:
+  #   kind: vapi-chat
+  #   apiKey: "${env:VAPI_API_KEY}"
+  #   assistantId: "${env:VAPI_ASSISTANT_ID}"
 ```
+
+## What the framework is tested against
+
+A framework is only as credible as its evidence that it catches real failures.
+That needs targets whose correct behavior is known, and Vapi's sample agent
+cannot provide that. The framework is tested against, in order of preference:
+
+1. **Agents we control, with planted defects** (the "bug zoo", built in M1).
+   Small agents written against the Anthropic SDK, backed by a fake system of
+   record. Each has defects planted on purpose, such as a wrong date argument,
+   booking without confirming, inventing an answer when retrieval misses, or
+   following instructions hidden in tool output. The framework's catch rate on
+   planted defects measures the framework itself. They run in CI and need no
+   account beyond a model key.
+2. **The `fake` target and `fake` provider** for unit tests: scripted, free,
+   deterministic.
+3. **A stub HTTP agent for M0.** The zoo does not exist until M1, and the
+   `http` target needs something to run against. M0 ships `examples/stub-agent`,
+   a tiny HTTP server with rule-based replies and reported tool calls. It needs
+   no model key and no account, so anyone can clone the repo and run the
+   examples. M1 replaces it with the first zoo agent behind the same HTTP
+   contract, so the example scenarios keep working.
+4. **Third-party agents (Vapi's chat API and others)** as contract-tested
+   adapters and demos. This is the real job in production, but it is the
+   wrong foundation for developing and validating the framework.
+
+Example scenarios in the repository target 1 to 3. Vapi scenarios, if shipped,
+live under `examples/vapi/` and are marked as requiring an account.
 
 ## Blueprint integration
 
@@ -550,9 +601,9 @@ depends on it by git URL.
 - **Fresh repository with fresh history.** Nothing is copied with history from
   `qa-tool-server`, whose history references client projects.
 - **Synthetic fixtures only.** No client names, tenant ids, transcripts from
-  client projects, assistant ids or keys. Riley is Vapi's public sample agent,
-  so example scenarios may target an agent like it, configured through
-  environment variables.
+  client projects, assistant ids or keys. Examples target the stub agent (and,
+  from M1, the bug zoo). Any optional Vapi example reads its assistant id and
+  key from environment variables.
 - **Secrets only as environment references**, enforced by the config loader:
   a literal value in a field marked secret is a validation error.
 - **No telemetry.**
@@ -575,8 +626,11 @@ depends on it by git URL.
 ## Acceptance criteria
 
 - [ ] Every interface above exists, exported and documented.
-- [ ] `evals run` runs an example scenario end to end against `vapi-chat` and
-      against `http` (the HTTP target tested against a local stub agent).
+- [ ] `evals run` runs an example scenario end to end against the `http` target
+      and `examples/stub-agent`, with no account and no key beyond the model
+      key for the simulator and judge.
+- [ ] `vapi-chat` runs the same scenario shape end to end against a test
+      assistant. This is a manual check, not part of CI.
 - [ ] All six deterministic checks and both LLM graders are ported, and the
       parity test passes.
 - [ ] Aggregation follows the new rule. The offline replay of stored Vapi
@@ -587,7 +641,9 @@ depends on it by git URL.
       `borderline`.
 - [ ] Blueprint's CI job runs through the package with no schema change, and an
       existing project's results render unchanged in the dashboard.
-- [ ] The Vapi contract test has run once, with its fixture committed.
+- [ ] Optional: the Vapi contract test has run once, with its fixture
+      committed, which moves `vapi-chat` to `toolCalls: 'verified'` (or shows
+      that the field name was wrong). M0 can close without it.
 
 ## Task breakdown
 
@@ -596,33 +652,36 @@ depends on it by git URL.
 3. Anthropic provider: structured outputs, refusal handling, fallbacks,
    usage-based cost.
 4. Simulators: `llm-persona` port and `scripted`.
-5. Targets: `vapi-chat` port, `http`, `fake`.
-6. Graders: deterministic ports, `min-content`, `rubric-judge`, `goal-check`,
+5. Targets: `http`, `fake`, and the `vapi-chat` port.
+6. `examples/stub-agent` and example scenarios against it.
+7. Graders: deterministic ports, `min-content`, `rubric-judge`, `goal-check`,
    with the new statuses.
-7. Aggregation, plus the offline replay script.
-8. Runner, events, budgets.
-9. Reporters: `console`, `json`, `webhook`.
-10. CLI: `validate` and `run` with the cost preview.
-11. Blueprint wrapper, on a feature branch in `qa-tool-server`.
-12. Vapi contract test (paid, run on request).
+8. Aggregation, plus the offline replay script.
+9. Runner, events, budgets.
+10. Reporters: `console`, `json`, `webhook`.
+11. CLI: `validate` and `run` with the cost preview.
+12. Blueprint wrapper, on a feature branch in `qa-tool-server`.
+13. Vapi contract test (optional, paid, run on request).
+
+Steps 1, 2 and the aggregation half of step 8 are already in the repository
+(schemas, interface types, the aggregation rule and tests).
 
 Estimate: one to two weeks part-time.
 
 ## Open questions
 
-1. **Name.** `blueprint-evals` ties it to the brand, which helps Blueprint's
-   credibility. A neutral name might be adopted more widely. Decide before the
-   first publish, since package names are hard to change.
-2. **License.** Apache-2.0 is the recommendation: it includes a patent grant
-   and is common for developer tooling. MIT is simpler and also fine.
-3. **Publishing.** Publish to npm during M0, or use a git dependency until M2,
-   when the interfaces have survived real use. Recommendation: git dependency
-   until M2.
-4. **Blueprint's judge model.** Keep `claude-sonnet-4-6` for continuity with
+Name, license, distribution and the reference target are settled and recorded
+under [Decisions](#decisions). What remains:
+
+1. **Blueprint's judge model.** Keep `claude-sonnet-4-6` for continuity with
    existing results, or re-baseline on a current model now. Re-baselining is
    cheapest while volume is small (52 graded runs), but the human-agreement
    labels collected so far apply to the old judge and would need collecting
    again.
-5. **Status name.** This doc uses `uncertain` in the framework and keeps
+2. **Status name.** This doc uses `uncertain` in the framework and keeps
    "borderline" as Blueprint's display label. Pick one word for both if that
    reads better in reports.
+3. **Stub agent scope.** Rule-based replies are enough to exercise the `http`
+   target and the graders, but they cannot show an LLM judge doing anything
+   interesting. If the examples feel hollow, pull the first zoo agent (an
+   LLM-backed booking agent) forward from M1 rather than growing the stub.
