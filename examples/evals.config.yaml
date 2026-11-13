@@ -1,9 +1,14 @@
 # Example config. Start the stub agent first:  npm run stub-agent
+#
+# Uses Haiku 5.5 for both roles so a test run costs a few cents at most.
+# Haiku has no server-side refusal fallback, so fallbacks is off.
+# For real calibration, try the judge on claude-sonnet-5-5 (2.00 / 10.00 per
+# MTok, fallbacks: true) or claude-opus-5-5 (4.00 / 20.00, fallbacks: true).
 models:
-  simulator: { provider: anthropic, model: claude-opus-5-5, effort: low }
-  judge:     { provider: anthropic, model: claude-opus-5-5, effort: high, fallbacks: true }
+  simulator: { provider: anthropic, model: claude-haiku-5-5, effort: low, fallbacks: false }
+  judge:     { provider: anthropic, model: claude-haiku-5-5, effort: high, fallbacks: false }
 pricing:
-  claude-opus-5-5: { inputPerMTok: 4.00, outputPerMTok: 20.00 }
+  claude-haiku-5-5: { inputPerMTok: 0.10, outputPerMTok: 0.50 }
 targets:
   stub-agent:
     kind: http

@@ -66,9 +66,22 @@ export function writeFiles(dir: string, files: Record<string, string>): string {
   return dir
 }
 
-/** The example config, pointed at a running stub agent. */
+/**
+ * The models and prices the tests assume. Pinned here so changing the model in
+ * the user-facing example config (to something cheaper, say) cannot break them.
+ */
+const PINNED_MODELS = `models:
+  simulator: { provider: anthropic, model: claude-opus-5-5, effort: low }
+  judge:     { provider: anthropic, model: claude-opus-5-5, effort: high, fallbacks: true }
+pricing:
+  claude-opus-5-5: { inputPerMTok: 4.00, outputPerMTok: 20.00 }
+`
+
+/** The example config's target, pointed at a running stub agent, with the models pinned for tests. */
 export function exampleConfigFor(baseUrl: string, replace: [string, string][] = []): string {
-  let text = readFileSync(join(examples, 'evals.config.yaml'), 'utf8').replace('http://127.0.0.1:4010/chat', `${baseUrl}/chat`)
+  let text = readFileSync(join(examples, 'evals.config.yaml'), 'utf8')
+    .replace('http://127.0.0.1:4010/chat', `${baseUrl}/chat`)
+    .replace(/^models:[\s\S]*?^targets:/m, `${PINNED_MODELS}targets:`)
   for (const [from, to] of replace) text = text.replace(from, to)
   return text
 }
