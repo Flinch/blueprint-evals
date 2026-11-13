@@ -31,6 +31,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "stub-agent": "tsx examples/stub-agent/serve.ts",
+    "health-bot": "tsx examples/health-bot/serve.ts",
     "evals": "tsx src/cli/index.ts",
     "ui": "tsx src/cli/index.ts ui",
     "ui:demo": "npm run build:ui && tsx scripts/seed-demo.ts"

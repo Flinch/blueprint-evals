@@ -1,0 +1,36 @@
+# Config for the Maple Family Clinic assistant (examples/health-bot/SPEC.md).
+# Start the good build first:  npm run health-bot
+# It listens on http://127.0.0.1:4020. For a known-bad build, see
+# evals.defect.config.yaml (port 4021).
+#
+# The simulator runs on Haiku 5.5 (cheap, fine for plain patient personas). The
+# judge runs on Sonnet 5.5 at high effort, because a judge that passes a bad
+# agent is the costly mistake. Haiku has no server-side refusal fallback, so its
+# fallbacks setting is off.
+#
+# shortCircuit is off so the judge also runs after a code check fails. Every
+# failing run then shows the judge's critique, which is what the known-bad
+# builds are for.
+models:
+  simulator: { provider: anthropic, model: claude-haiku-5-5, effort: low, fallbacks: false }
+  judge:     { provider: anthropic, model: claude-sonnet-5-5, effort: high, fallbacks: true }
+pricing:
+  claude-haiku-5-5:  { inputPerMTok: 0.10, outputPerMTok: 0.50 }
+  claude-sonnet-5-5: { inputPerMTok: 2.00, outputPerMTok: 10.00 }
+shortCircuit: false
+targets:
+  health-bot:
+    kind: http
+    url: http://127.0.0.1:4020/chat
+    request:
+      body:
+        message: "{{input.text}}"
+        conversation_id: "{{session}}"
+    response:
+      text: "$.reply"
+      session: "$.conversation_id"
+      toolCalls:
+        path: "$.tool_calls[*]"
+        name: "$.name"
+        arguments: "$.args"
+    toolCalls: reported

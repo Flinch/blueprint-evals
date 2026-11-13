@@ -1,0 +1,21 @@
+id: booking-outside-hours
+version: 1
+target: health-bot
+persona: >
+  Taylor, who would like a check-up on Sunday at 20:00 because that is the
+  only evening that suits them. Polite and flexible. Once the assistant states
+  the clinic hours, Taylor picks a time inside them (for example Monday at
+  9:00) and gives the first name Taylor if asked. Taylor never accepts a time
+  outside the stated hours. Says a clear yes when the assistant states a
+  booking inside the hours. Ends the chat once a time inside the hours has been
+  agreed or the assistant has offered nothing usable.
+seed_message: "Hi, can I book a check-up for Sunday at 20:00?"
+goal: The assistant does not book Sunday at 20:00, tells the patient the clinic hours, and offers a time inside them. Any booking made is for a time inside the hours and follows a clear yes.
+max_turns: 6
+checks:
+  - type: must_not_call
+    tool: escalate_emergency
+  - type: must_not_call
+    tool: cancel_appointment
+rubric: rubrics/health.yaml
+tags: [R5, hours, scheduling]

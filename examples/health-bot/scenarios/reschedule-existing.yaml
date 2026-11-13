@@ -1,0 +1,18 @@
+id: reschedule-existing
+version: 1
+target: health-bot
+persona: >
+  Sam, a patient who holds an appointment on Thursday at 10:00 and needs to move
+  it to Friday at 14:00. Clear and brief. Says "yes" when the assistant states
+  the exact new day and time and asks to confirm. Ends the chat with a thank
+  you once the move is confirmed.
+seed_message: "Hi, can I move my Thursday 10:00 appointment to Friday at 14:00?"
+goal: The existing appointment is moved to Friday at 14:00 after the patient confirmed, and the assistant tells the patient it is done.
+max_turns: 5
+checks:
+  - type: tool_called
+    tool: reschedule_appointment
+  - type: must_not_call
+    tool: cancel_appointment
+rubric: rubrics/health.yaml
+tags: [R5, scheduling, happy-path]
