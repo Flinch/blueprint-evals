@@ -1,0 +1,30 @@
+# Same as evals.config.yaml, but pointed at a stub agent with the planted no-confirm
+# defect on port 4011. Start it with:
+#   PORT=4011 npm run stub-agent -- --defect=no-confirm
+# Running the example scenarios against it should produce real failures.
+models:
+  simulator: { provider: anthropic, model: claude-haiku-5-5, effort: low, fallbacks: false }
+  judge:     { provider: anthropic, model: claude-sonnet-5-5, effort: high, fallbacks: true }
+pricing:
+  claude-haiku-5-5:  { inputPerMTok: 0.10, outputPerMTok: 0.50 }
+  claude-sonnet-5-5: { inputPerMTok: 2.00, outputPerMTok: 10.00 }
+# Run the judge even after a code check has already failed, so every failing run
+# also shows what the judge thought. Costs a little more. The default (true)
+# skips the judge once a code check fails.
+shortCircuit: false
+targets:
+  stub-agent:
+    kind: http
+    url: http://127.0.0.1:4011/chat
+    request:
+      body:
+        message: "{{input.text}}"
+        conversation_id: "{{session}}"
+    response:
+      text: "$.reply"
+      session: "$.conversation_id"
+      toolCalls:
+        path: "$.tool_calls[*]"
+        name: "$.name"
+        arguments: "$.args"
+    toolCalls: reported

@@ -44,8 +44,17 @@ interface ToolCall {
   args: Record<string, unknown>
 }
 
-const MEDICAL = /\b(pain|symptom|medication|dose|dosage|diagnos|prescri|should i take|is it safe)\b/i
+// The stub is deliberately simple, but it should not fail in ways nobody planted.
+// The only planted defect is `no-confirm`. Everything else here exists so that a
+// failure on the defective agent can be attributed to that defect.
+const MEDICAL =
+  /\b(pain|hurts?|symptoms?|medications?|doses?|dosage|overdos\w*|diagnos\w*|prescri\w*|should i take|is it safe|worse|worried|scared|unwell|sick|dizz\w*|bleed\w*|chest|breath\w*|fever|feel(?:ing)? (?:really )?(?:bad|awful|terrible)|who (?:do i|should i|can i) call)\b/i
+const EMERGENCY = /\b(chest|breath\w*|bleed\w*|overdos\w*|emergency|unconscious|really bad|who (?:do i|should i|can i) call)\b/i
 const CANCEL = /\bcancel\b/i
+// "don't cancel it", "do not cancel", "I changed my mind": not a request to cancel.
+const NEGATED_CANCEL = /\b(?:don'?t|do not|not|never|without)\b[^.?!]*\bcancel|\bchanged my mind\b|\bnot cancel/i
+// A question about where things stand: "is it booked?", "what time is it now?", "can you confirm?".
+const STATUS = /\b(confirm\w*|booked|what time|when is|go(?:ne)? through|went through|already|status|is it (?:done|moved|set|cancelled|canceled)|did (?:it|that))\b/i
 const RESCHEDULE = /\b(move|reschedul|change|shift|push)\b/i
 const YES = /^\s*(yes|yep|yeah|sure|ok|okay|confirm|please do|go ahead|that works)\b/i
 const NO = /^\s*(no|nope|nah|don't|do not|stop|never mind)\b/i
@@ -79,10 +88,13 @@ export function createStubAgent(options: StubAgentOptions = {}) {
   function respond(message: string, conv: Conversation): { reply: string; toolCalls: ToolCall[] } {
     const toolCalls: ToolCall[] = []
 
-    // Out of scope: never give medical advice.
+    // Out of scope: never give medical advice. Anything that sounds urgent also
+    // gets pointed at emergency services.
     if (MEDICAL.test(message)) {
       return {
-        reply: "I can't give medical advice. Please speak to your clinician. I can help with your appointment though.",
+        reply: EMERGENCY.test(message)
+          ? "I can't give medical advice. If this is an emergency, please call emergency services now. Otherwise please speak to your clinician."
+          : "I can't give medical advice. Please speak to your clinician. I can help with your appointment though.",
         toolCalls,
       }
     }
@@ -101,7 +113,18 @@ export function createStubAgent(options: StubAgentOptions = {}) {
       return { reply: 'Sorry, I did not catch that. Should I go ahead? Please say yes or no.', toolCalls }
     }
 
+    if (CANCEL.test(message) && NEGATED_CANCEL.test(message)) {
+      if (conv.appointment.status === 'cancelled') {
+        return { reply: 'Your appointment is already cancelled. I can book a new one if you like.', toolCalls }
+      }
+      return { reply: 'Understood, I will not cancel anything. Anything else?', toolCalls }
+    }
+
     if (CANCEL.test(message)) {
+      // Never cancel twice: say where things stand instead.
+      if (conv.appointment.status === 'cancelled') {
+        return { reply: 'Your appointment is already cancelled. I can book a new one if you like.', toolCalls }
+      }
       const pending: Pending = { action: 'cancel' }
       if (options.defect === 'no-confirm') return perform(pending, conv)
       conv.pending = pending
@@ -119,6 +142,15 @@ export function createStubAgent(options: StubAgentOptions = {}) {
       conv.pending = pending
       return {
         reply: `I can move your appointment to ${date} at ${time}. Shall I go ahead?`,
+        toolCalls,
+      }
+    }
+
+    // A question about where things stand gets a straight answer.
+    if (STATUS.test(message)) {
+      const a = conv.appointment
+      return {
+        reply: a.status === 'cancelled' ? 'Your appointment is cancelled.' : `Your appointment is booked for ${a.date} at ${a.time}.`,
         toolCalls,
       }
     }

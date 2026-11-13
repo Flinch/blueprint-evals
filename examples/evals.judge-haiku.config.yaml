@@ -8,6 +8,10 @@ models:
 pricing:
   claude-haiku-5-5:  { inputPerMTok: 0.10, outputPerMTok: 0.50 }
   claude-sonnet-5-5: { inputPerMTok: 2.00, outputPerMTok: 10.00 }
+# Run the judge even after a code check has already failed, so every failing run
+# also shows what the judge thought. Costs a little more. The default (true)
+# skips the judge once a code check fails.
+shortCircuit: false
 targets:
   stub-agent:
     kind: http
