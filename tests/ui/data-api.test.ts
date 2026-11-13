@@ -28,6 +28,7 @@ describe('GET /api/health', () => {
       scenarioPath: f.scenariosDir,
       labelsFile: join(f.workdir, '.evals', 'labels.jsonl'),
       uiBuilt: false,
+      demo: false,
       activeJob: null,
     })
     expect(typeof r.version).toBe('string')

@@ -61,6 +61,8 @@ export interface UiServerOptions {
   token?: string
   maxBodyBytes?: number
   queueSeed?: string
+  /** Marks the data as synthetic demo data. Reported in `GET /api/health` so the page can say so. Default false. */
+  demo?: boolean
 }
 
 export interface UiServer {
@@ -380,6 +382,7 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServer>
         scenarioPath,
         labelsFile,
         uiBuilt: isBuilt(staticDir),
+        demo: options.demo === true,
         activeJob: activeJob(),
       }
       return { body }

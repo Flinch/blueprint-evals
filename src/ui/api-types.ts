@@ -86,6 +86,8 @@ export interface HealthResponse {
   labelsFile: string
   /** False until `dist/ui/index.html` exists. */
   uiBuilt: boolean
+  /** True when the server was started on synthetic demo data (`npm run ui:demo`). The page shows a banner. */
+  demo: boolean
   activeJob: ActiveJob | null
 }
 

@@ -181,6 +181,8 @@ export async function fixture(options: FixtureOptions = {}): Promise<Fixture> {
     env: { [SECRET_ENV]: SECRET, ...options.env },
     fetch: options.fetch,
     createProvider: () => provider,
+    // An empty directory, so these tests do not depend on whether `npm run build` has put the front end in dist/ui.
+    staticDir: join(workdir, 'no-ui-build'),
     ...options.server,
   })
   return {

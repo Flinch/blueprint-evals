@@ -136,17 +136,35 @@ Data is stored under `.evals/` in the directory you start it from (listed in
 | `.evals/calibration/<id>.json` | saved calibration reports |
 | `.evals/labels.jsonl` | human labels (change it with `--labels`) |
 
-The front end is built into `dist/ui`. Until it is there, the server shows a "UI
+The front end is React and Vite in `ui/`, built into `dist/ui` (`npm run build`
+does it, or `npm run build:ui` alone). Until it is there, the server shows a "UI
 not built yet" page, and the JSON API still works. The API is described in
 [docs/design/0003-ui-and-api.md](docs/design/0003-ui-and-api.md).
+
+```bash
+npm run ui:demo     # builds the UI, writes synthetic demo data to .evals-demo/, serves it
+npm run dev:ui      # Vite dev server on :5173 that proxies /api to a running `evals ui`
+```
+
+`npm run ui:demo` is the way to see every screen with no model key and no spend.
+It writes about 25 stub-agent runs, labels and a saved calibration under
+`.evals-demo/` (listed in `.gitignore`), starts the server on port 4748 and prints
+the link to open. The page shows a "Demo data" banner. The demo server cannot
+create a model provider, so nothing it does can call a model, and runs of
+scenarios that only run checks work against a stub agent it starts for you. Pass
+`--port <n>` or `--no-open` after `--`.
+
+`npm run dev:ui` needs the link `evals ui` printed, so the proxy can sign its
+requests: `EVALS_UI_URL='http://127.0.0.1:4747/?token=...' npm run dev:ui`. The
+token stays in the dev server process and never reaches the browser.
 
 ## Develop
 
 ```bash
 npm install
-npm run typecheck
-npm test
-npm run build
+npm run typecheck   # the library and server, then the front end in ui/
+npm test            # library, server and CLI tests in node, front end tests in jsdom
+npm run build       # compiles to dist/, then builds the front end into dist/ui
 ```
 
 Node 20 or later.

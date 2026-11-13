@@ -2,9 +2,9 @@
 
 | | |
 |---|---|
-| Status | Phase 1 (backend) implemented. Phase 2 (front end) builds on this document |
+| Status | Phase 1 (backend) and Phase 2 (front end, `ui/`) implemented |
 | Date | 2026-11-13 |
-| Code | `src/engine/`, `src/store/`, `src/server/`, `src/ui/api-types.ts`, `src/cli/ui.ts` |
+| Code | `src/engine/`, `src/store/`, `src/server/`, `src/ui/api-types.ts`, `src/cli/ui.ts`, `ui/` (front end), `scripts/seed-demo.ts` (demo data) |
 | Builds on | [0001](0001-m0-core-interfaces.md) (runner, graders), [0002](0002-judge-methodology.md) (labels, calibration, the random quota) |
 
 ## Summary
@@ -226,9 +226,12 @@ Type names refer to the appendix.
 
 **`GET /api/health`** returns `HealthResponse`: version, the workdir, the data
 directory, the config file, scenarios path and label file in use (each may be
-`null` except the label file), whether `dist/ui` is built, and the active job.
-Poll it once at start to decide what the page can offer (no config means no
-runs).
+`null` except the label file), whether `dist/ui` is built, whether the server is
+running on synthetic demo data (`demo`), and the active job. Poll it once at
+start to decide what the page can offer (no config means no runs). `demo` is
+`true` only when the server was started by `npm run ui:demo` (the
+`demo` option of `startUiServer`), and the page then shows a "Demo data" banner.
+`evals ui` never sets it.
 
 **`GET /api/overview?limit=100`** returns `OverviewResponse`, aggregated over the
 newest `limit` suites (1 to 1000). It carries pass, fail and error counts, the
@@ -514,6 +517,55 @@ These follow from the above. They are the parts that are easy to get wrong.
 9. Unknown paths without a file extension return `index.html`, so client-side
    routes survive a reload. Paths with an extension that do not exist are 404.
 
+## Front end (Phase 2)
+
+The page is React and TypeScript in `ui/`, built by Vite into `dist/ui` with
+`emptyOutDir: false` (the build removes only its own `index.html` and `assets/`,
+so the compiled `api-types` stays). It imports its types from
+`src/ui/api-types.ts` with `import type`, so nothing from the server reaches the
+bundle. React, Vite and the test libraries are devDependencies, so the package's
+runtime dependencies are unchanged.
+
+| Route | Screen |
+|---|---|
+| `#/` | Overview: goal-achieved rate first, pass rate, runs, cost (null shown as unknown), trend, failures by tag, failing criteria and checks |
+| `#/runs`, `#/runs/<runId>` | Suites, filtered run list, and run detail with transcript, tool calls, checks (skipped shown apart from pass), criteria with critiques, goal, cost, trace |
+| `#/launch` | Choose scenarios and a cap, preview, confirm, then live progress from the event stream and cancel |
+| `#/classify`, `#/classify/labels` | Blind review queue, and the label list |
+| `#/calibration` | Choose rubric, split and selection, preview, confirm, then the report with the true negative rate first |
+| `#/scenarios` | Read-only scenarios, rubrics and validation problems |
+
+Choices worth knowing:
+
+- **Hash routing**, with no router dependency, so a reload at any address returns
+  `index.html` and the page restores its own route.
+- **Fonts are bundled** (`@fontsource`, latin subsets) instead of linked from Google
+  Fonts. The server's Content-Security-Policy allows only this origin for styles and
+  fonts, so a Google Fonts link would be blocked, and a bundled font makes no
+  request to another origin and looks the same offline. Fallback stacks cover a
+  font that fails to load.
+- **Theme.** Blueprint's warm dark palette is the default. Blueprint has no light
+  theme, so the light tokens are derived from the same palette. The choice is saved
+  in `localStorage` inside try/catch, and the page works when storage throws.
+- **One event stream** per page, in a provider, with a reducer over the events. A
+  replayed event is applied once, a dropped connection shows a notice, and a stream
+  that the browser closes for good is opened again.
+- **Blind labelling.** The queue view renders the criterion text, `input`, `output`
+  and, on request, `context`. It never renders `reason`, and it calls
+  `GET /api/labels/:id/reveal` only after `POST /api/labels` succeeds and the person
+  asks for it. Tests assert that neither the reason nor the judge's text is in the
+  DOM before the label is saved.
+- **Confirmation.** The page never calls `POST /api/run/start` or
+  `POST /api/calibrate/start` without a preview of the same request and a click in a
+  dialog that states the scope and the number of model calls. A changed selection or
+  cap drops the preview. A 412 triggers a new preview and a list of what changed.
+- **Demo mode.** `npm run ui:demo` starts the server with `demo: true`, which
+  `GET /api/health` reports and the page turns into a "Demo data" banner. The demo
+  server has no model provider and no key, so a plan that calls a model is refused
+  at start with 503 `provider_unavailable`.
+- **Development.** `npm run dev:ui` runs Vite with a proxy for `/api` that adds the
+  token header and presents the server's own origin. See the README.
+
 ## Command line
 
 ```
@@ -659,6 +711,8 @@ export interface HealthResponse {
   labelsFile: string
   /** False until `dist/ui/index.html` exists. */
   uiBuilt: boolean
+  /** True when the server was started on synthetic demo data (`npm run ui:demo`). The page shows a banner. */
+  demo: boolean
   activeJob: ActiveJob | null
 }
 
