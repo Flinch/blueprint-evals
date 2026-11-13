@@ -1,0 +1,26 @@
+# Example config. Start the stub agent first:  npm run stub-agent
+#
+# Same as evals.config.yaml, but the judge is Haiku 5.5 too. Used to compare the two
+# judges on the same labels: run `evals calibrate` once with each config.
+models:
+  simulator: { provider: anthropic, model: claude-haiku-5-5, effort: low, fallbacks: false }
+  judge:     { provider: anthropic, model: claude-haiku-5-5, effort: high, fallbacks: false }
+pricing:
+  claude-haiku-5-5:  { inputPerMTok: 0.10, outputPerMTok: 0.50 }
+  claude-sonnet-5-5: { inputPerMTok: 2.00, outputPerMTok: 10.00 }
+targets:
+  stub-agent:
+    kind: http
+    url: http://127.0.0.1:4010/chat
+    request:
+      body:
+        message: "{{input.text}}"
+        conversation_id: "{{session}}"
+    response:
+      text: "$.reply"
+      session: "$.conversation_id"
+      toolCalls:
+        path: "$.tool_calls[*]"
+        name: "$.name"
+        arguments: "$.args"
+    toolCalls: reported
