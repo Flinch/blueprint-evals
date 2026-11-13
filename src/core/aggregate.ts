@@ -7,7 +7,10 @@ import type { CriterionResult, GraderResult, RunStatus } from './interfaces.js'
 //   otherwise                              -> pass
 //
 // Skipped graders are reported and never count as passes, but they do not fail
-// the run either.
+// the run either. The same goes for a criterion the judge found not applicable:
+// the situation it governs never arose, so it is reported and left out of
+// grading. It can never fail a run, even a critical one, and never counts as a
+// pass.
 //
 // This replaces a banded rule in which a criterion near its threshold made the
 // whole run "borderline". On the one real project we have data for, that put
@@ -24,13 +27,34 @@ export function aggregateStatus(results: GraderResult[]): RunStatus {
   return 'pass'
 }
 
+/** True for a criterion that was graded: its situation arose, so it passed or failed. */
+export const isApplicable = (c: CriterionResult): boolean => c.verdict !== 'not_applicable'
+
+export interface CriterionCounts {
+  pass: number
+  fail: number
+  notApplicable: number
+}
+
+/** How many criteria passed, failed and were found not applicable. */
+export function countCriteria(criteria: CriterionResult[]): CriterionCounts {
+  const counts: CriterionCounts = { pass: 0, fail: 0, notApplicable: 0 }
+  for (const c of criteria) {
+    if (c.verdict === 'pass') counts.pass++
+    else if (c.verdict === 'fail') counts.fail++
+    else counts.notApplicable++
+  }
+  return counts
+}
+
 /**
- * Weighted share of judged criteria that passed, or null if none were judged.
- * A diagnostic that says how much went right. It is not the verdict, and it is
+ * Weighted share of applicable criteria that passed, or null if none applied.
+ * A criterion found not applicable is left out of both sides of the share. A
+ * diagnostic that says how much went right. It is not the verdict, and it is
  * derived: no judge ever produces a number.
  */
 export function aggregateScore(results: GraderResult[]): number | null {
-  const criteria: CriterionResult[] = results.flatMap(r => r.criteria ?? [])
+  const criteria: CriterionResult[] = results.flatMap(r => r.criteria ?? []).filter(isApplicable)
   if (criteria.length === 0) return null
   const totalWeight = criteria.reduce((sum, c) => sum + c.weight, 0)
   if (totalWeight === 0) return null

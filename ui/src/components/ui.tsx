@@ -5,22 +5,36 @@ import { prettyJson } from '../lib/format'
 // Small shared pieces, in Blueprint's patterns: square outlined badges, banners,
 // stat tiles, a modal. Everything renders stored text as text, never as HTML.
 
-export type Status = 'pass' | 'fail' | 'error' | 'skipped' | 'running' | 'queued'
+export type Status = 'pass' | 'fail' | 'error' | 'skipped' | 'running' | 'queued' | 'not_applicable'
 
-const STATUS_LABEL: Record<Status, string> = { pass: 'Pass', fail: 'Fail', error: 'Error', skipped: 'Skipped', running: 'Running', queued: 'Queued' }
-const STATUS_GLYPH: Record<Status, string> = { pass: '✓', fail: '✕', error: '!', skipped: '○', running: '●', queued: '○' }
+const STATUS_LABEL: Record<Status, string> = { pass: 'Pass', fail: 'Fail', error: 'Error', skipped: 'Skipped', running: 'Running', queued: 'Queued', not_applicable: 'N/A' }
+const STATUS_GLYPH: Record<Status, string> = { pass: '✓', fail: '✕', error: '!', skipped: '○', running: '●', queued: '○', not_applicable: '–' }
+/** What a screen reader says where the visible text is an abbreviation. */
+const STATUS_SPOKEN: Partial<Record<Status, string>> = { not_applicable: 'Not applicable' }
 
-/** Skipped is its own look (dashed, hatched, hollow glyph) so it can never pass for a pass. */
+/**
+ * Skipped is its own look (dashed, hatched, hollow glyph) so it can never pass for a pass.
+ * Not applicable is muted and dotted: the criterion's situation never arose, so it was not graded.
+ */
 export function StatusBadge({ status, label }: { status: Status; label?: string }) {
+  const visible = label ?? STATUS_LABEL[status]
+  const spoken = label === undefined ? STATUS_SPOKEN[status] : undefined
   return (
-    <span className={`badge badge-${status}`} data-status={status}>
+    <span className={`badge badge-${status}`} data-status={status} title={status === 'not_applicable' ? 'Not applicable. This criterion was not graded.' : undefined}>
       <span aria-hidden="true">{STATUS_GLYPH[status]}</span>
-      {label ?? STATUS_LABEL[status]}
+      {spoken ? (
+        <>
+          <span aria-hidden="true">{visible}</span>
+          <span className="sr-only">{spoken}</span>
+        </>
+      ) : (
+        visible
+      )}
     </span>
   )
 }
 
-export function VerdictBadge({ verdict }: { verdict: 'pass' | 'fail' }) {
+export function VerdictBadge({ verdict }: { verdict: 'pass' | 'fail' | 'not_applicable' }) {
   return <StatusBadge status={verdict} />
 }
 

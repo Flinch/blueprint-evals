@@ -1,6 +1,6 @@
 import { join } from 'node:path'
 import { createSuiteWriter, storePaths, type SuiteRecord } from '../../src/store/index.js'
-import type { CriterionResult, GraderResult, RunResult, RunStatus } from '../../src/index.js'
+import type { CriterionResult, CriterionVerdict, GraderResult, RunResult, RunStatus } from '../../src/index.js'
 import { makeTrace } from '../helpers.js'
 
 export interface RunSpec {
@@ -8,7 +8,7 @@ export interface RunSpec {
   scenario?: string
   status?: RunStatus
   /** Criterion verdicts the judge gave, by criterion id. */
-  criteria?: Record<string, 'pass' | 'fail'>
+  criteria?: Record<string, CriterionVerdict>
   tags?: string[]
   costUsd?: number | null
   goalAchieved?: boolean | null
@@ -35,6 +35,7 @@ export function runResult(spec: RunSpec): RunResult {
     weight: 1,
     critical: id === 'critical-one',
   }))
+  const applicable = criteria.filter(c => c.verdict !== 'not_applicable')
   const graders: GraderResult[] =
     criteria.length > 0
       ? [{ grader: 'rubric-judge(r@1)', status: criteria.some(c => c.verdict === 'fail') ? 'fail' : 'pass', criteria, reason: 'judged' }]
@@ -44,7 +45,8 @@ export function runResult(spec: RunSpec): RunResult {
     trace,
     graders,
     status: spec.status ?? (failing ? 'fail' : 'pass'),
-    score: criteria.length === 0 ? null : criteria.filter(c => c.verdict === 'pass').length / criteria.length,
+    // Not-applicable criteria are left out of both sides of the share.
+    score: applicable.length === 0 ? null : applicable.filter(c => c.verdict === 'pass').length / applicable.length,
     goalAchieved: spec.goalAchieved ?? null,
     costUsd: spec.costUsd === undefined ? 0.01 : spec.costUsd,
     durationMs: 100,

@@ -34,9 +34,13 @@ export const overview = (over: Partial<OverviewResponse> = {}): OverviewResponse
     { tag: 'safety', runs: 5, pass: 2, fail: 3, error: 0 },
     { tag: 'scheduling', runs: 7, pass: 5, fail: 1, error: 1 },
   ],
+  criteria: [
+    { criterion: 'confirms-before-acting', pass: 6, fail: 3, notApplicable: 0, critical: false },
+    { criterion: 'no-medical-advice', pass: 8, fail: 1, notApplicable: 0, critical: true },
+  ],
   topFailingCriteria: [
-    { criterion: 'confirms-before-acting', failures: 3, judged: 9, failureRate: 3 / 9, scenarios: ['reschedule-tomorrow-3pm', 'asks-to-cancel-then-declines'], critical: false },
-    { criterion: 'no-medical-advice', failures: 1, judged: 9, failureRate: 1 / 9, scenarios: ['asks-for-medical-advice'], critical: true },
+    { criterion: 'confirms-before-acting', failures: 3, judged: 9, notApplicable: 0, failureRate: 3 / 9, scenarios: ['reschedule-tomorrow-3pm', 'asks-to-cancel-then-declines'], critical: false },
+    { criterion: 'no-medical-advice', failures: 1, judged: 9, notApplicable: 0, failureRate: 1 / 9, scenarios: ['asks-for-medical-advice'], critical: true },
   ],
   topFailingChecks: [{ grader: 'must_not_call(cancel_appointment)', failures: 2, scenarios: ['asks-to-cancel-then-declines'] }],
   warnings: [],
@@ -58,6 +62,7 @@ export const runItem = (over: Partial<RunListItem> = {}): RunListItem => ({
   tags: ['scheduling'],
   models: { judge: 'claude-opus-5-5' },
   failedCriteria: [],
+  notApplicableCriteria: [],
   failedChecks: [],
   warnings: 0,
   ...over,
@@ -227,7 +232,7 @@ export const queueItem = (over: Partial<QueueItem> = {}): QueueItem => ({
 
 export const queue = (over: Partial<QueueResponse> = {}): QueueResponse => ({
   items: [queueItem(), queueItem({ itemId: 'run-ok-2:confirms-before-acting', runId: 'run-ok-2', output: 'I can move it to 15:00. Shall I go ahead?', reason: 'random', outputTurn: 1, group: 'run-ok-2' })],
-  stats: { candidates: 10, pending: 4, queued: 2, labelled: 5, labelledRandom: 1, labelledRandomShare: 0.2, minRandomShare: 0.3, quotaMet: false },
+  stats: { candidates: 10, notApplicable: 0, pending: 4, queued: 2, labelled: 5, labelledRandom: 1, labelledRandomShare: 0.2, minRandomShare: 0.3, quotaMet: false },
   notes: [],
   ...over,
 })

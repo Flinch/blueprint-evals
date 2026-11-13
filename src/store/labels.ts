@@ -3,7 +3,8 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { z } from 'zod'
 import { checkLabels, LabelSchema, MIN_RANDOM_SHARE, parseLabels, splitOf, type Label, type Split } from '../calibration/labels.js'
-import type { CriterionResult, RunResult } from '../core/interfaces.js'
+import { isApplicable } from '../core/aggregate.js'
+import type { CriterionResult, CriterionVerdict, RunResult } from '../core/interfaces.js'
 import type { Turn } from '../core/trace.js'
 import { renderTranscript } from '../graders/transcript.js'
 import type { SuiteRecord } from './suites.js'
@@ -18,7 +19,10 @@ import type { SuiteRecord } from './suites.js'
 //     built field by field (never by spreading a candidate) so a new judge
 //     field cannot leak into one by accident. `revealItem` returns the judge's
 //     verdict, and only for an item that already has a human label.
-//  2. A random quota. At least MIN_RANDOM_SHARE of all labels are randomly
+//  2. Applicable criteria only. A criterion the judge found not applicable (its
+//     situation never arose) is never offered: a person cannot pass or fail
+//     something that never happened. Such criteria are counted in the stats.
+//  3. A random quota. At least MIN_RANDOM_SHARE of all labels are randomly
 //     sampled, because only random labels can estimate the judge's accuracy.
 
 // ----------------------------------------------------------- the label file
@@ -159,8 +163,10 @@ export interface QueueOptions {
 }
 
 export interface QueueStats {
-  /** Run x criterion items that are not labelled yet. */
+  /** Run x criterion items that are not labelled yet. Criteria the judge found not applicable are not items. */
   candidates: number
+  /** Unlabelled criteria left out of the queue because the judge found them not applicable. */
+  notApplicable: number
   /** How many of those the plan puts up for review. The rest are passes that were not sampled. */
   pending: number
   queued: number
@@ -217,8 +223,9 @@ function criteriaOf(result: RunResult): CriterionResult[] {
   return result.graders.flatMap(g => (g.status === 'pass' || g.status === 'fail' ? g.criteria ?? [] : []))
 }
 
-function candidatesOf(suite: SuiteRecord, rubricFor: RubricLookup | undefined): Candidate[] {
+function candidatesOf(suite: SuiteRecord, rubricFor: RubricLookup | undefined): { candidates: Candidate[]; notApplicable: string[] } {
   const out: Candidate[] = []
+  const notApplicable: string[] = []
   for (const run of suite.results) {
     const found = judgedResponse(run.trace.turns)
     if (!found) continue // nothing to label: LabelSchema needs a non-empty output
@@ -235,19 +242,25 @@ function candidatesOf(suite: SuiteRecord, rubricFor: RubricLookup | undefined): 
     const rubric = rubricFor?.(run.trace.scenario.id)
     const textOf = (id: string) => rubric?.criteria.find(c => c.id === id)
 
-    const judged = criteriaOf(run)
-    for (const c of judged) {
+    // Every criterion the judge decided, including the ones it found not applicable: an errored run must not
+    // hand those back to a human as "undecided".
+    const decided = criteriaOf(run)
+    for (const c of decided) {
+      if (!isApplicable(c)) {
+        notApplicable.push(itemIdOf(base.runId, c.id))
+        continue
+      }
       const r = textOf(c.id)
       out.push({
         item: { ...base, itemId: itemIdOf(base.runId, c.id), criterion: { id: c.id, text: r?.text ?? null, critical: r?.critical ?? c.critical } },
-        judged: { verdict: c.verdict },
+        judged: { verdict: c.verdict as 'pass' | 'fail' },
         runError: false,
       })
     }
     // A run that errored may have criteria the judge never decided. Those need a human most.
     if (run.status === 'error' && rubric) {
       for (const c of rubric.criteria) {
-        if (judged.some(j => j.id === c.id)) continue
+        if (decided.some(j => j.id === c.id)) continue
         out.push({
           item: { ...base, itemId: itemIdOf(base.runId, c.id), criterion: { id: c.id, text: c.text, critical: c.critical } },
           judged: undefined,
@@ -256,7 +269,7 @@ function candidatesOf(suite: SuiteRecord, rubricFor: RubricLookup | undefined): 
       }
     }
   }
-  return out
+  return { candidates: out, notApplicable }
 }
 
 interface Plan {
@@ -265,6 +278,7 @@ interface Plan {
   /** Ids of every unlabelled item, whether or not it is up for review. */
   candidateIds: Set<string>
   candidates: number
+  notApplicable: number
   labelled: number
   labelledRandom: number
   random: number
@@ -294,9 +308,12 @@ function plan(options: QueueOptions): Plan {
   const labelledRandom = options.labels.filter(l => l.sampled_by === 'random').length
 
   const seen = new Set<string>()
+  const skippedNa = new Set<string>()
   const candidates: Candidate[] = []
   for (const suite of options.suites) {
-    for (const c of candidatesOf(suite, options.rubricFor)) {
+    const found = candidatesOf(suite, options.rubricFor)
+    for (const id of found.notApplicable) if (!labelledIds.has(id)) skippedNa.add(id)
+    for (const c of found.candidates) {
       if (labelledIds.has(c.item.itemId) || seen.has(c.item.itemId)) continue
       seen.add(c.item.itemId)
       candidates.push(c)
@@ -320,7 +337,7 @@ function plan(options: QueueOptions): Plan {
   }
   const orderKey = new Map(selected.map(i => [i.itemId, hex(seed, 'order', i.itemId)]))
   selected.sort((a, b) => orderKey.get(a.itemId)!.localeCompare(orderKey.get(b.itemId)!))
-  return { all: selected, candidateIds: seen, candidates: candidates.length, labelled, labelledRandom, random: randomCount }
+  return { all: selected, candidateIds: seen, candidates: candidates.length, notApplicable: skippedNa.size, labelled, labelledRandom, random: randomCount }
 }
 
 /** The review queue: up to `limit` items, never carrying the judge's verdict or critique. */
@@ -351,6 +368,7 @@ export function buildQueue(options: QueueOptions): ReviewQueue {
     items: page,
     stats: {
       candidates: p.candidates,
+      notApplicable: p.notApplicable,
       pending: p.all.length,
       queued: page.length,
       labelled: p.labelled,
@@ -388,11 +406,11 @@ export interface Reveal {
   runId: string
   suiteId: string | null
   /** The judge's verdict on this criterion. Null when the judge never decided it (the run errored first). */
-  judge: { verdict: 'pass' | 'fail'; critique: string; critical: boolean; grader: string } | null
+  judge: { verdict: CriterionVerdict; critique: string; critical: boolean; grader: string } | null
   /** Why the run errored, when it did. */
   runError: string | null
   human: { verdict: Label['verdict']; critique: string; labeler: string; at: string }
-  /** Null when there is no judge verdict to compare with. */
+  /** Null when there is no judge verdict to compare with, which includes a judge that found the criterion not applicable. */
   agrees: boolean | null
 }
 
@@ -423,6 +441,6 @@ export function revealItem(label: Label, findRun: RunLookup): Reveal | null {
     judge,
     runError: found.result.error ?? null,
     human: { verdict: label.verdict, critique: label.critique, labeler: label.labeler, at: label.at },
-    agrees: judge ? judge.verdict === label.verdict : null,
+    agrees: judge && judge.verdict !== 'not_applicable' ? judge.verdict === label.verdict : null,
   }
 }

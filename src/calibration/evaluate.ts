@@ -165,7 +165,8 @@ const STUB_SCENARIO = ScenarioSchema.parse({ id: 'calibration', version: 1, targ
  * Evaluates a rubric judge against labels, one criterion at a time: a label
  * about one criterion is judged against that criterion alone, with only the
  * examples that illustrate it. That is how the post builds judges, and it keeps
- * a label from costing a judgement of every criterion.
+ * a label from costing a judgement of every criterion. Calibration stays
+ * binary: the judge here is not offered `not_applicable`.
  */
 export function createRubricLabelJudge(options: RubricLabelJudgeOptions): LabelJudge {
   const { rubric, provider, effort, timeoutMs } = options
@@ -200,9 +201,13 @@ export function createRubricLabelJudge(options: RubricLabelJudgeOptions): LabelJ
         metadata: { frameworkVersion: FRAMEWORK_VERSION, models: {} },
       }
 
-      const result = await createRubricJudge({ rubric: single, provider, effort, timeoutMs }).grade(trace, STUB_SCENARIO, { runId: label.id })
+      // A labelled item is applicable by definition, so this judge cannot answer not_applicable.
+      const result = await createRubricJudge({ rubric: single, provider, effort, timeoutMs, allowNotApplicable: false }).grade(trace, STUB_SCENARIO, { runId: label.id })
       if (result.status === 'error' || !result.criteria?.[0]) throw new Error(result.reason)
-      return { verdict: result.criteria[0].verdict, critique: result.criteria[0].critique, usage: result.usage }
+      const { verdict, critique } = result.criteria[0]
+      // Unreachable while the schema forbids it. Kept so a future change cannot slip an n/a into the metrics.
+      if (verdict === 'not_applicable') throw new Error(`The judge answered not_applicable for label "${label.id}", but a labelled item is always applicable.`)
+      return { verdict, critique, usage: result.usage }
     },
   }
 }

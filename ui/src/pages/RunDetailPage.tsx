@@ -132,19 +132,22 @@ function CheckItem({ g, onCite }: { g: GraderResult; onCite(i: number): void }) 
 
 function RubricBlock({ g, onCite }: { g: GraderResult; onCite(i: number): void }) {
   const decided = g.status === 'pass' || g.status === 'fail'
+  const graded = (g.criteria ?? []).filter(c => c.verdict !== 'not_applicable')
+  const notApplicable = (g.criteria ?? []).filter(c => c.verdict === 'not_applicable')
+  const noneApplied = decided && graded.length === 0 && notApplicable.length > 0
   return (
     <div className="stack-sm">
       <div className="row">
         <StatusBadge status={g.status} />
         <span className="verdict-name">{g.grader}</span>
-        {g.score !== undefined ? <span className="crit-meta" title="Weighted share of criteria passed. It is a diagnostic only.">score {score(g.score)}</span> : null}
+        {g.score !== undefined || noneApplied ? <span className="crit-meta" title="Weighted share of applicable criteria passed. It is a diagnostic only.">score {score(g.score ?? null)}</span> : null}
         {g.model ? <span className="crit-meta">{g.model.servedBy && g.model.servedBy !== g.model.model ? `answered by ${g.model.servedBy}` : g.model.model}</span> : null}
       </div>
       {!decided ? <div className="small break" style={{ color: g.status === 'error' ? 'var(--warning)' : 'var(--muted)' }}>{g.reason}</div> : null}
       {g.warnings?.length ? <Warnings items={g.warnings} /> : null}
-      {g.criteria && g.criteria.length > 0 ? (
+      {graded.length > 0 ? (
         <div className="verdict-list">
-          {g.criteria.map(c => (
+          {graded.map(c => (
             <div className="verdict-item" key={c.id} data-verdict={c.verdict}>
               <div className="verdict-top">
                 <VerdictBadge verdict={c.verdict} />
@@ -155,6 +158,25 @@ function RubricBlock({ g, onCite }: { g: GraderResult; onCite(i: number): void }
               <div className="verdict-body"><CitedText text={c.critique} onCite={onCite} /></div>
             </div>
           ))}
+        </div>
+      ) : null}
+      {notApplicable.length > 0 ? (
+        <div className="stack-sm" data-testid="not-applicable-criteria">
+          <h3 className="sub-title">Not applicable ({notApplicable.length})</h3>
+          <div className="small muted">The situation these criteria govern never arose in this run. They are not graded: they cannot fail the run and do not count as passes.</div>
+          <div className="verdict-list">
+            {notApplicable.map(c => (
+              <div className="verdict-item na" key={c.id} data-verdict={c.verdict}>
+                <div className="verdict-top">
+                  <VerdictBadge verdict={c.verdict} />
+                  <span className="verdict-name">{c.id}</span>
+                  {c.critical ? <CriticalMarker /> : null}
+                  <span className="crit-meta" style={{ marginLeft: 'auto' }}>Not graded</span>
+                </div>
+                <div className="verdict-body"><CitedText text={c.critique} onCite={onCite} /></div>
+              </div>
+            ))}
+          </div>
         </div>
       ) : null}
     </div>
@@ -224,7 +246,15 @@ export function RunDetail({ result, suiteId }: { result: RunResult; suiteId?: st
           value={result.goalAchieved === null ? 'No goal check' : result.goalAchieved ? 'Achieved' : 'Not achieved'}
           sub={result.goalAchieved === null ? 'The scenario has no goal, or the check could not run.' : undefined}
         />
-        <Tile label="Score" value={score(result.score)} sub="Weighted share of criteria passed. A diagnostic." />
+        <Tile
+          label="Score"
+          value={score(result.score)}
+          sub={
+            result.score === null && result.graders.some(g => g.criteria?.some(c => c.verdict === 'not_applicable'))
+              ? 'No criterion applied in this run, so there is no score.'
+              : 'Weighted share of applicable criteria passed. A diagnostic.'
+          }
+        />
         <Tile label="Cost" value={usd(result.costUsd)} sub={result.costUsd === null ? 'A model had no price in the config.' : `${tokens(trace.usage.inputTokens)} in, ${tokens(trace.usage.outputTokens)} out`} />
         <Tile label="Duration" value={duration(result.durationMs)} sub={`${plural(trace.turns.length, 'turn')}`} />
       </div>
@@ -263,7 +293,7 @@ export function RunDetail({ result, suiteId }: { result: RunResult; suiteId?: st
         <>
           <div className="section-header">
             <h2 className="section-title">Rubric criteria</h2>
-            <span className="section-note">The judge writes a critique, then decides pass or fail.</span>
+            <span className="section-note">The judge writes a critique, then decides pass or fail. A criterion whose situation never arose is marked N/A and not graded.</span>
           </div>
           <div className="stack">{rubric.map((g, i) => <RubricBlock key={i} g={g} onCite={jump} />)}</div>
         </>

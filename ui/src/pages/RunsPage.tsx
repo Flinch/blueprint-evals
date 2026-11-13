@@ -41,11 +41,14 @@ export function RunRow({ run }: { run: RunListItem }) {
         ) : failing.length > 0 ? (
           <span className="run-sub" style={{ display: 'block' }} title={failing.join(', ')}>Failed: {failing.join(', ')}</span>
         ) : (
-          <span className="run-sub" style={{ display: 'block' }}>{run.tags.join(', ') || 'No tags'} &middot; {plural(run.turns, 'turn')}</span>
+          <span className="run-sub" style={{ display: 'block' }}>
+            {run.tags.join(', ') || 'No tags'} &middot; {plural(run.turns, 'turn')}
+            {run.notApplicableCriteria.length > 0 ? <> &middot; {run.notApplicableCriteria.length} N/A (not graded)</> : null}
+          </span>
         )}
       </td>
       <td className="cell-goal"><GoalCell goal={run.goalAchieved} /></td>
-      <td className="cell-score" title="Weighted share of criteria passed. It is a diagnostic only.">{score(run.score)}</td>
+      <td className="cell-score" title="Weighted share of applicable criteria passed. It is a diagnostic only. n/a means no criterion applied.">{score(run.score)}</td>
       <td className="cell-cost">{usd(run.costUsd)}</td>
       <td className="cell-duration">{duration(run.durationMs)}</td>
       <td className="cell-date">{shortDate(run.startedAt)}</td>

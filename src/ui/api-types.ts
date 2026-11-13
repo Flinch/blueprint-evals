@@ -12,7 +12,7 @@
 import type { CalibrationReport } from '../calibration/evaluate.js'
 import type { Label, Split } from '../calibration/labels.js'
 import type { EnvRef, ModelNeeds, PreviewData } from '../engine/plan.js'
-import type { GraderResult, RunResult, RunStatus } from '../core/interfaces.js'
+import type { CriterionVerdict, GraderResult, RunResult, RunStatus } from '../core/interfaces.js'
 import type { Rubric, Scenario } from '../core/scenario.js'
 import type { Turn } from '../core/trace.js'
 import type { CalibrationRecord } from '../store/calibration.js'
@@ -22,7 +22,7 @@ import type {
 import type { SuiteRecord, SuiteStatus, SuiteSummary } from '../store/suites.js'
 
 export type {
-  CalibrationReport, CalibrationRecord, EnvRef, GraderResult, Label, LabelStats, ModelNeeds, PreviewData, QueueItem, QueueReason,
+  CalibrationReport, CalibrationRecord, CriterionVerdict, EnvRef, GraderResult, Label, LabelStats, ModelNeeds, PreviewData, QueueItem, QueueReason,
   QueueStats, QueueToolCall, QueueTurn, Reveal, Rubric, RunResult, RunStatus, Scenario, Split, SuiteRecord, SuiteStatus, SuiteSummary, Turn,
 }
 
@@ -120,11 +120,24 @@ export interface TagFailures {
 export interface FailingCriterion {
   criterion: string
   failures: number
-  /** Times the judge decided this criterion in the suites considered. */
+  /** Times the judge graded this criterion (pass or fail) in the suites considered. Runs where it was not applicable are not counted. */
   judged: number
+  /** Times the judge found this criterion not applicable. Not part of `judged` or `failureRate`. */
+  notApplicable: number
+  /** failures / judged. */
   failureRate: number
   /** Scenarios whose runs failed it. */
   scenarios: string[]
+  critical: boolean
+}
+
+/** Pass, fail and not-applicable counts for one criterion, over the suites considered. */
+export interface CriterionTally {
+  criterion: string
+  pass: number
+  fail: number
+  /** The situation the criterion governs never arose. Not graded. */
+  notApplicable: number
   critical: boolean
 }
 
@@ -152,6 +165,9 @@ export interface OverviewResponse {
   /** Oldest first, so it can be drawn left to right. */
   trend: TrendPoint[]
   failuresByTag: TagFailures[]
+  /** Every criterion the judge decided, with its pass, fail and not-applicable counts, by id. Not applicable is never counted as a pass or a failure. */
+  criteria: CriterionTally[]
+  /** Criteria with at least one failure. Runs where a criterion was not applicable are left out of the rates. */
   topFailingCriteria: FailingCriterion[]
   topFailingChecks: FailingCheck[]
   /** Corrupt files that were skipped, and the like. */
@@ -203,6 +219,8 @@ export interface RunListItem {
   models: { simulator?: string; judge?: string }
   /** Ids of criteria the judge failed. */
   failedCriteria: string[]
+  /** Ids of criteria the judge found not applicable. They are not graded. */
+  notApplicableCriteria: string[]
   /** Names of deterministic checks that failed. */
   failedChecks: string[]
   error?: string
@@ -325,7 +343,7 @@ export interface StreamBase {
 export type TurnEvent = Omit<Turn, 'raw'>
 
 /** What `run:end` carries. Fetch GET /api/runs/:runId for the full trace. */
-export type RunEndSummary = Omit<RunListItem, 'suiteId' | 'startedAt' | 'turns' | 'tags' | 'models' | 'failedChecks'> & {
+export type RunEndSummary = Omit<RunListItem, 'suiteId' | 'startedAt' | 'turns' | 'tags' | 'models' | 'failedChecks' | 'notApplicableCriteria'> & {
   turns: number
 }
 

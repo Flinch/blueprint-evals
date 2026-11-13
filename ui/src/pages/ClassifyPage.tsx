@@ -94,6 +94,10 @@ export function RevealView({ reveal }: { reveal: RevealResponse }) {
         <Banner kind="info" title="The judge never decided this criterion.">
           {reveal.runError ? <>The run ended with an error first: <span className="break">{reveal.runError}</span></> : 'There is no judge verdict to compare with.'}
         </Banner>
+      ) : judge.verdict === 'not_applicable' ? (
+        <Banner kind="info" title="The judge found this criterion not applicable.">
+          Its situation never arose in the run, so the judge did not grade it and there is no verdict to compare with.
+        </Banner>
       ) : reveal.agrees ? (
         <Banner kind="success" role="status"><span className="agree-banner">You and the judge agree.</span> Both said {human.verdict}.</Banner>
       ) : (

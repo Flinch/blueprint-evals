@@ -25,7 +25,11 @@ what the agent *did*: tool calls, their order, and (in later milestones) the
 state of the system of record afterwards. It also treats the judge itself as a
 system under test: judges give a written critique and a binary pass or fail, so
 they can be measured as classifiers against human labels (see
-[the judge methodology](docs/design/0002-judge-methodology.md)). And it
+[the judge methodology](docs/design/0002-judge-methodology.md)). When a
+criterion's situation never arose in a conversation (a clinical-advice rule in a
+chat where nobody asked a clinical question), the judge marks it **not
+applicable**. It is shown as N/A, left out of the score and the pass rates, and
+never fails a run. Calibration stays binary. And it
 separates "the agent failed" from "the test infrastructure failed", so a timeout
 never shows up as a bad score.
 
@@ -113,7 +117,8 @@ npx evals ui                    # or: npm run ui
 
 `evals ui` starts a local web page for what the command line produces: a
 dashboard and run list over saved runs, per-run detail (transcripts, tool calls,
-check and criterion verdicts with critiques, cost, models, warnings), buttons to
+check and criterion verdicts with critiques, N/A criteria listed apart and marked
+as not graded, cost, models, warnings), buttons to
 run scenarios and calibration, and a review queue where you label outputs pass or
 fail with a critique. Labels are written in the same `labels.jsonl` format that
 `evals calibrate` reads. The queue hides the judge's verdict until you have

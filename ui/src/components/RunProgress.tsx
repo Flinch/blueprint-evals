@@ -22,7 +22,7 @@ function LiveRunRow({ run }: { run: LiveRun }) {
         {run.turns.length > 0 ? <span className="small muted num">{plural(run.turns.length, 'turn')}</span> : null}
         {run.summary ? (
           <>
-            <span className="small num" title="Weighted share of criteria passed">score {score(run.summary.score)}</span>
+            <span className="small num" title="Weighted share of applicable criteria passed">score {score(run.summary.score)}</span>
             <span className="small num muted">{usd(run.summary.costUsd)}</span>
             <span className="small num muted">{duration(run.summary.durationMs)}</span>
             {run.runId ? <a className="btn btn-ghost btn-sm" href={runHref(run.runId)}>Open run</a> : null}

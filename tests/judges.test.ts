@@ -79,9 +79,9 @@ describe('rubric judge', () => {
       await createRubricJudge({ rubric, provider: p, ...opts }).grade(t, scenario, ctx)
       return p.calls[0]!
     }
-    it('asks for a critique first, then a pass or fail, with no scale to hedge on', async () => {
+    it('asks for a critique first, then a verdict, with no scale to hedge on', async () => {
       const { system } = await send()
-      expect(system).toMatch(/first write a critique, then give a verdict of pass or fail/)
+      expect(system).toMatch(/first write a critique, then give a verdict of pass, fail or not_applicable/)
       expect(system).toMatch(/no in-between verdict/)
       expect(system).not.toMatch(/0 to 1|\bscore\b/i)
     })

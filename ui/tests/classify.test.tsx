@@ -230,7 +230,7 @@ describe('blind labelling: validation and controls', () => {
   })
 
   it('shows a met quota', async () => {
-    installFetch(routes({ 'GET /api/queue': { body: queue({ stats: { candidates: 5, pending: 2, queued: 2, labelled: 10, labelledRandom: 5, labelledRandomShare: 0.5, minRandomShare: 0.3, quotaMet: true } }) } }))
+    installFetch(routes({ 'GET /api/queue': { body: queue({ stats: { candidates: 5, notApplicable: 0, pending: 2, queued: 2, labelled: 10, labelledRandom: 5, labelledRandomShare: 0.5, minRandomShare: 0.3, quotaMet: true } }) } }))
     renderApp('/classify')
     const quota = await screen.findByLabelText('Random sampling quota')
     expect(within(quota).getByText('Met')).toBeInTheDocument()

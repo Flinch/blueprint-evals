@@ -1,6 +1,6 @@
 import type { GraderResult, RunResult } from '../core/interfaces.js'
 import type {
-  FailingCheck, FailingCriterion, OverviewResponse, RunEndSummary, RunListItem, SuiteListItem, SuiteState, TagFailures, TrendPoint,
+  CriterionTally, FailingCheck, FailingCriterion, OverviewResponse, RunEndSummary, RunListItem, SuiteListItem, SuiteState, TagFailures, TrendPoint,
 } from '../ui/api-types.js'
 import type { SuiteHeader, SuiteRecord } from '../store/suites.js'
 
@@ -11,6 +11,11 @@ const decided = (g: GraderResult) => g.status === 'pass' || g.status === 'fail'
 
 export function failedCriteria(result: RunResult): string[] {
   return result.graders.filter(decided).flatMap(g => (g.criteria ?? []).filter(c => c.verdict === 'fail').map(c => c.id))
+}
+
+/** Ids of criteria the judge found not applicable in this run. They are reported, never graded. */
+export function notApplicableCriteria(result: RunResult): string[] {
+  return result.graders.filter(decided).flatMap(g => (g.criteria ?? []).filter(c => c.verdict === 'not_applicable').map(c => c.id))
 }
 
 export function failedChecks(result: RunResult): string[] {
@@ -37,6 +42,7 @@ export function runListItem(suiteId: string, result: RunResult): RunListItem {
       ...(models.judge ? { judge: models.judge.servedBy ?? models.judge.model } : {}),
     },
     failedCriteria: failedCriteria(result),
+    notApplicableCriteria: notApplicableCriteria(result),
     failedChecks: failedChecks(result),
     ...(result.error ? { error: result.error } : {}),
     warnings: result.warnings.length,
@@ -116,19 +122,30 @@ export function buildOverview(suites: SuiteRecord[], totalSuites: number, warnin
   }
 
   const criteria = new Map<string, FailingCriterion>()
+  const tallies = new Map<string, CriterionTally>()
   const checks = new Map<string, FailingCheck & { _s: Set<string> }>()
   for (const r of results) {
     const scenario = r.trace.scenario.id
     for (const g of r.graders.filter(decided)) {
       for (const c of g.criteria ?? []) {
-        const e = criteria.get(c.id) ?? { criterion: c.id, failures: 0, judged: 0, failureRate: 0, scenarios: [], critical: false }
-        e.judged++
-        if (c.verdict === 'fail') {
-          e.failures++
-          if (!e.scenarios.includes(scenario)) e.scenarios.push(scenario)
-        }
+        const t = tallies.get(c.id) ?? { criterion: c.id, pass: 0, fail: 0, notApplicable: 0, critical: false }
+        t.critical ||= c.critical
+        tallies.set(c.id, t)
+        const e = criteria.get(c.id) ?? { criterion: c.id, failures: 0, judged: 0, notApplicable: 0, failureRate: 0, scenarios: [], critical: false }
         e.critical ||= c.critical
         criteria.set(c.id, e)
+        // A criterion the judge found not applicable was not graded, so it is not a judged criterion and never a failure.
+        if (c.verdict === 'not_applicable') {
+          t.notApplicable++
+          e.notApplicable++
+          continue
+        }
+        e.judged++
+        if (c.verdict === 'fail') {
+          t.fail++
+          e.failures++
+          if (!e.scenarios.includes(scenario)) e.scenarios.push(scenario)
+        } else t.pass++
       }
       if (g.status === 'fail' && !(g.criteria && g.criteria.length > 0)) {
         const e = checks.get(g.grader) ?? { grader: g.grader, failures: 0, scenarios: [], _s: new Set<string>() }
@@ -156,6 +173,7 @@ export function buildOverview(suites: SuiteRecord[], totalSuites: number, warnin
     },
     trend,
     failuresByTag: [...tags.values()].sort((a, b) => b.fail + b.error - (a.fail + a.error) || a.tag.localeCompare(b.tag)),
+    criteria: [...tallies.values()].sort((a, b) => a.criterion.localeCompare(b.criterion)),
     topFailingCriteria: [...criteria.values()]
       .filter(c => c.failures > 0)
       .map(c => ({ ...c, failureRate: c.failures / c.judged }))

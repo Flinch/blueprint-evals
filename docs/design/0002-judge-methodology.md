@@ -58,12 +58,14 @@ allows a founder or an honest developer to be the expert.
    reason to exclude a case from agreement metrics.
 3. **The run verdict is simple.** Any grader `error` makes the run `error`.
    Otherwise any failed check, failed criterion or failed goal makes it `fail`.
-   Otherwise `pass`. Skipped graders are reported and never count as passes.
+   Otherwise `pass`. Skipped graders are reported and never count as passes. A
+   criterion found not applicable is reported and never decides (see
+   [Not applicable](#not-applicable)).
 4. **`critical` stays as metadata.** A failed critical criterion fails the run
    like any other, and is marked so a consumer (Blueprint's Launch Readiness
    rules) can treat it as release-blocking. It does not change the run status.
-5. **The score is derived, not judged.** It is the weighted share of criteria
-   that passed. It is a diagnostic. The headline outcome is `goalAchieved`,
+5. **The score is derived, not judged.** It is the weighted share of applicable
+   criteria that passed, or `null` when none applied. It is a diagnostic. The headline outcome is `goalAchieved`,
    taken from the goal check, which is `true`, `false`, or `null` when there is
    no goal or the check could not run.
 6. **Rubric `threshold` is gone.** A rubric that still carries one is rejected
@@ -92,6 +94,74 @@ A response is often only wrong relative to what was asked, which is why the
 input matters. `excerpt`, `label` and `rationale` become `output`, `verdict` and
 `critique`.
 
+### Not applicable
+
+A criterion often governs a situation that a given conversation never reaches. A
+rule such as "redirects clinical questions to a clinician" has nothing to measure
+in a scheduling chat where nobody asked a clinical question. Reporting that as a
+pass inflated the pass rate and the score, and a critique reading "never
+triggered" sat next to a green mark.
+
+**Decision.** A criterion gets one of three verdicts: `pass`, `fail` or
+`not_applicable` (shown as "N/A" in the UI).
+
+**Definition.** `not_applicable` means the situation the criterion governs never
+arose in this transcript, so the assistant had no opportunity to meet or break
+it. The critique must say why. It says nothing about the judge's confidence, and
+it is not the removed `uncertain` (decision 2 above stands). If the criterion did
+apply but the evidence is mixed, the judge must still decide `pass` or `fail`.
+If the assistant itself introduced the topic or performed the governed action,
+the situation did arise: an assistant that volunteers medical advice in a
+scheduling chat fails the no-advice criterion and is never `not_applicable`.
+
+**Aggregation.**
+
+| Case | Result |
+|---|---|
+| Score | Weighted share of applicable criteria that passed. `null` when none applied |
+| Grader status | `fail` if any applicable criterion failed, otherwise `pass` |
+| Every criterion is `not_applicable` | The grader still reports `pass` and adds the warning "No rubric criterion applied in this run, so the rubric tested nothing here." It reaches `RunResult.warnings` |
+| `critical` and `not_applicable` | Never fails. Criticality only matters for a criterion that was graded |
+| Run status | `not_applicable` neither fails a run nor counts as a pass |
+| Overview and run list | Pass rates, failure counts, "most common failing criteria" and average score leave it out. Per-criterion pass, fail and not-applicable counts are kept apart |
+
+**Calibration stays binary.** A label is about one criterion in one output, so a
+labelled item is applicable by definition. Labels remain `pass` or `fail` and the
+label schema is unchanged. The judge that calibration builds
+(`createRubricLabelJudge`) is created with the option `allowNotApplicable: false`:
+its response schema has only `pass` and `fail`, and its prompt does not mention
+`not_applicable`, so a calibration run cannot come back N/A and no item can drop
+out of the rates for that reason.
+
+**The review queue leaves it out.** A person cannot pass or fail something that
+never happened, and the label would have no graded verdict to be measured
+against. A not-applicable criterion is never offered as an item. It is counted in
+the queue stats so the gap is visible.
+
+**Few-shot examples.** Anchors keep `pass` and `fail` only. Teaching the judge
+when to say N/A from examples would need labels the file format does not have,
+and the prompt carries the definition.
+
+**Stored data.** The verdict is a widening of the stored field. Suites written
+before this change contain no `not_applicable` and load, display and aggregate
+exactly as they did, so `schemaVersion` stays 1.
+
+**The abuse risk.** `not_applicable` is a way out of a hard call. A judge, or a
+prompt edit, that answers it too freely would hide real failures behind a muted
+pill that is easy to skim past, and the numbers would look better for it. The
+mitigations:
+
+- The prompt forbids using it to avoid a hard call, requires the critique to
+  explain why the situation never arose, and states that a situation the assistant
+  created itself did arise.
+- N/A criteria stay visible with their critique on the run page, so a reader can
+  disagree, and the all-N/A warning stops a rubric that tested nothing from
+  passing silently.
+- Planned: a check that flags a judge returning N/A too often (for example more
+  than a set share of verdicts for a criterion across a suite) and surfaces the
+  criteria involved, since a rubric whose criteria are mostly N/A is also a sign
+  the scenarios do not exercise it.
+
 ## Part B: calibration (implemented)
 
 Code: `src/calibration/` (`labels.ts`, `metrics.ts`, `evaluate.ts`). The command is `evals calibrate --labels file --rubric file --split dev|test`. It prints how many judge calls it will make and asks before making them, refuses the train split, and exits 2 on a contamination error. It exits 0 once the judge has been measured, even if the rates are low, because it is a measurement and not a gate.
@@ -107,7 +177,7 @@ Blueprint, a CLI, or a hand-edited file.
 | `group` | Optional. The conversation or run the label belongs to. Every label with the same group lands in the same split, so one transcript can never be a few-shot example for one criterion and a test case for another. Defaults to `id` |
 | `criterion` | The rubric criterion the verdict is about |
 | `input`, `output` | The context and the response being judged |
-| `verdict` | `pass` or `fail`, from the human |
+| `verdict` | `pass` or `fail`, from the human. There is no N/A: a labelled item is applicable |
 | `critique` | Required on every label, not only disagreements. The post's training material is exactly the confirmations with a critique |
 | `labeler` | Who labelled it |
 | `sampled_by` | `random` or `targeted` |

@@ -44,6 +44,17 @@ export function failureLines(result: RunResult): string[] {
   return lines
 }
 
+/**
+ * The criteria the judge found not applicable, one line each, with its reason.
+ * They were not graded, so they are listed apart from the failures and never
+ * in them.
+ */
+export function notApplicableLines(result: RunResult): string[] {
+  return result.graders.flatMap(g =>
+    (g.criteria ?? []).filter(c => c.verdict === 'not_applicable').map(c => `n/a criterion (not graded): ${c.id}: ${oneLine(c.critique)}`),
+  )
+}
+
 export function createConsoleReporter(write: (text: string) => void): ConsoleReporter {
   const results: RunResult[] = []
   const out = (line = '') => write(`${line}\n`)
@@ -54,6 +65,7 @@ export function createConsoleReporter(write: (text: string) => void): ConsoleRep
         `cost ${runCost(result.costUsd)}  ${formatDuration(result.durationMs)}`,
     )
     if (result.status !== 'pass') for (const l of failureLines(result)) out(`        ${l}`)
+    for (const l of notApplicableLines(result)) out(`        ${l}`)
   }
 
   return {

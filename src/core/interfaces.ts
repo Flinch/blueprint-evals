@@ -84,9 +84,20 @@ export interface ModelProvider {
  */
 export type GraderStatus = 'pass' | 'fail' | 'error' | 'skipped'
 
+/**
+ *  - pass / fail: the situation the criterion governs arose, and the assistant
+ *    met it or did not.
+ *  - not_applicable: that situation never arose in this transcript, so the
+ *    assistant had no opportunity to meet or break the criterion. The critique
+ *    says why. It is not graded: it never fails a run and never counts as a
+ *    pass. It is not a confidence flag either (see
+ *    docs/design/0002-judge-methodology.md, "Not applicable").
+ */
+export type CriterionVerdict = 'pass' | 'fail' | 'not_applicable'
+
 export interface CriterionResult {
   id: string
-  verdict: 'pass' | 'fail'
+  verdict: CriterionVerdict
   /** The judge's written reasoning, produced before the verdict. */
   critique: string
   weight: number
@@ -96,7 +107,7 @@ export interface CriterionResult {
 export interface GraderResult {
   grader: string
   status: GraderStatus
-  /** Weighted share of criteria passed, 0..1. A diagnostic, not the verdict. */
+  /** Weighted share of applicable criteria passed, 0..1. Absent when no criterion applied. A diagnostic, not the verdict. */
   score?: number
   criteria?: CriterionResult[]
   reason: string
@@ -135,7 +146,7 @@ export interface RunResult {
   trace: Trace
   graders: GraderResult[]
   status: RunStatus
-  /** Weighted share of criteria passed, or null if no criteria were judged. A diagnostic. */
+  /** Weighted share of applicable criteria passed, or null if no criterion applied. A diagnostic. */
   score: number | null
   /** The headline outcome, from the goal check. Null when there is no goal or the check could not run. */
   goalAchieved: boolean | null

@@ -116,7 +116,7 @@ export function OverviewPage() {
 
               <div className="section-header">
                 <h2 className="section-title">Most common failing criteria</h2>
-                <span className="section-note">Judged criteria the judge failed, most failures first.</span>
+                <span className="section-note">Graded criteria the judge failed, most failures first. Runs where a criterion was N/A are not counted.</span>
               </div>
               <div className="verdict-list">
                 {o.topFailingCriteria.length === 0 ? (
@@ -131,7 +131,10 @@ export function OverviewPage() {
                           failed {c.failures} of {c.judged} ({percent(c.failureRate)})
                         </span>
                       </div>
-                      <div className="small muted" style={{ marginTop: '0.3rem' }}>Scenarios: {c.scenarios.join(', ')}</div>
+                      <div className="small muted" style={{ marginTop: '0.3rem' }}>
+                        Scenarios: {c.scenarios.join(', ')}
+                        {c.notApplicable > 0 ? <> &middot; N/A in {plural(c.notApplicable, 'run')}</> : null}
+                      </div>
                     </div>
                   ))
                 )}

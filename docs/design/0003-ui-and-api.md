@@ -240,6 +240,14 @@ with one point per suite (oldest first, for drawing left to right), failure
 counts by scenario tag, the most common failing criteria, the most common failing
 deterministic checks, and warnings (corrupt files that were skipped).
 
+A criterion the judge found not applicable (its situation never arose, see
+[0002](0002-judge-methodology.md#not-applicable)) is left out of every rate here.
+`FailingCriterion.judged` and `failureRate` count graded verdicts only, so a
+criterion that was not applicable in half the runs is not diluted by them. The
+count of those runs is kept apart as `notApplicable`, and `criteria` gives the
+pass, fail and not-applicable counts for every criterion the judge decided. A run
+where no criterion applied has a `null` score and is left out of `avgScore`.
+
 ### Suites and runs
 
 **`GET /api/suites?limit=200`** returns `SuitesResponse`: `SuiteListItem[]`
@@ -252,7 +260,9 @@ when the file is unreadable, 400 for an unsafe id.
 
 **`GET /api/runs?suite=&scenario=&tag=&status=&limit=200&offset=0`** returns
 `RunsResponse`: compact `RunListItem[]` across the newest 200 suites, newest
-first, with `total` before paging. `status` is `pass`, `fail` or `error`.
+first, with `total` before paging. `status` is `pass`, `fail` or `error`. Each item
+lists `failedCriteria` and, apart from them, `notApplicableCriteria`: criteria that
+were not graded in that run. The two lists never share an id.
 
 **`GET /api/runs/:runId`** returns `RunResponse`: `{ suiteId, result }` where
 `result` is a full `RunResult` (trace with turns, tool calls and raw responses,
@@ -337,7 +347,10 @@ the same sanity warnings `evals validate` gives).
 
 **`GET /api/labels/:id/reveal`** returns `RevealResponse` for a label, with `:id`
 URL-encoded (item ids contain a colon). It returns the judge's verdict, critique
-and criticality for that item, the human label, and whether they agree. 403
+and criticality for that item, the human label, and whether they agree. A hand-made
+label can name a criterion the judge found not applicable. Then `judge.verdict` is
+`not_applicable` and `agrees` is `null`, because there is no graded verdict to
+compare with. 403
 `not_labelled` if the id has no label (this is also the answer for ids that do
 not exist, so the answer does not depend on whether a run does), 404
 `not_revealable` if the label is not for a queue item or its run is gone.
@@ -442,6 +455,14 @@ A run whose judge never decided some criterion (an `error` run) contributes thos
 criteria with `reason: 'targeted-error'`, taking the criterion list from the
 scenario's rubric as it is now.
 
+**A criterion the judge found not applicable is not an item.** Its situation never
+arose, so a person has nothing to pass or fail, and a label for it could not be
+compared with a graded verdict. It is also never counted as undecided in an `error`
+run. `QueueStats.notApplicable` says how many unlabelled criteria were left out for
+this reason, so the gap between the criteria in the runs and the items in the queue
+is visible. Only the count is exposed. The queue still never says which item the
+judge decided what.
+
 ### How the queue is chosen
 
 Let `L` be the number of labels, `R` how many of them are random, and `M` the
@@ -529,7 +550,7 @@ runtime dependencies are unchanged.
 | Route | Screen |
 |---|---|
 | `#/` | Overview: goal-achieved rate first, pass rate, runs, cost (null shown as unknown), trend, failures by tag, failing criteria and checks |
-| `#/runs`, `#/runs/<runId>` | Suites, filtered run list, and run detail with transcript, tool calls, checks (skipped shown apart from pass), criteria with critiques, goal, cost, trace |
+| `#/runs`, `#/runs/<runId>` | Suites, filtered run list, and run detail with transcript, tool calls, checks (skipped shown apart from pass), criteria with critiques (N/A criteria listed apart, muted and marked "Not graded"), goal, score (n/a when no criterion applied), cost, trace |
 | `#/launch` | Choose scenarios and a cap, preview, confirm, then live progress from the event stream and cancel |
 | `#/classify`, `#/classify/labels` | Blind review queue, and the label list |
 | `#/calibration` | Choose rubric, split and selection, preview, confirm, then the report with the true negative rate first |
@@ -637,7 +658,7 @@ This is `src/ui/api-types.ts`, verbatim.
 import type { CalibrationReport } from '../calibration/evaluate.js'
 import type { Label, Split } from '../calibration/labels.js'
 import type { EnvRef, ModelNeeds, PreviewData } from '../engine/plan.js'
-import type { GraderResult, RunResult, RunStatus } from '../core/interfaces.js'
+import type { CriterionVerdict, GraderResult, RunResult, RunStatus } from '../core/interfaces.js'
 import type { Rubric, Scenario } from '../core/scenario.js'
 import type { Turn } from '../core/trace.js'
 import type { CalibrationRecord } from '../store/calibration.js'
@@ -647,7 +668,7 @@ import type {
 import type { SuiteRecord, SuiteStatus, SuiteSummary } from '../store/suites.js'
 
 export type {
-  CalibrationReport, CalibrationRecord, EnvRef, GraderResult, Label, LabelStats, ModelNeeds, PreviewData, QueueItem, QueueReason,
+  CalibrationReport, CalibrationRecord, CriterionVerdict, EnvRef, GraderResult, Label, LabelStats, ModelNeeds, PreviewData, QueueItem, QueueReason,
   QueueStats, QueueToolCall, QueueTurn, Reveal, Rubric, RunResult, RunStatus, Scenario, Split, SuiteRecord, SuiteStatus, SuiteSummary, Turn,
 }
 
@@ -745,11 +766,24 @@ export interface TagFailures {
 export interface FailingCriterion {
   criterion: string
   failures: number
-  /** Times the judge decided this criterion in the suites considered. */
+  /** Times the judge graded this criterion (pass or fail) in the suites considered. Runs where it was not applicable are not counted. */
   judged: number
+  /** Times the judge found this criterion not applicable. Not part of `judged` or `failureRate`. */
+  notApplicable: number
+  /** failures / judged. */
   failureRate: number
   /** Scenarios whose runs failed it. */
   scenarios: string[]
+  critical: boolean
+}
+
+/** Pass, fail and not-applicable counts for one criterion, over the suites considered. */
+export interface CriterionTally {
+  criterion: string
+  pass: number
+  fail: number
+  /** The situation the criterion governs never arose. Not graded. */
+  notApplicable: number
   critical: boolean
 }
 
@@ -777,6 +811,9 @@ export interface OverviewResponse {
   /** Oldest first, so it can be drawn left to right. */
   trend: TrendPoint[]
   failuresByTag: TagFailures[]
+  /** Every criterion the judge decided, with its pass, fail and not-applicable counts, by id. Not applicable is never counted as a pass or a failure. */
+  criteria: CriterionTally[]
+  /** Criteria with at least one failure. Runs where a criterion was not applicable are left out of the rates. */
   topFailingCriteria: FailingCriterion[]
   topFailingChecks: FailingCheck[]
   /** Corrupt files that were skipped, and the like. */
@@ -828,6 +865,8 @@ export interface RunListItem {
   models: { simulator?: string; judge?: string }
   /** Ids of criteria the judge failed. */
   failedCriteria: string[]
+  /** Ids of criteria the judge found not applicable. They are not graded. */
+  notApplicableCriteria: string[]
   /** Names of deterministic checks that failed. */
   failedChecks: string[]
   error?: string
@@ -950,7 +989,7 @@ export interface StreamBase {
 export type TurnEvent = Omit<Turn, 'raw'>
 
 /** What `run:end` carries. Fetch GET /api/runs/:runId for the full trace. */
-export type RunEndSummary = Omit<RunListItem, 'suiteId' | 'startedAt' | 'turns' | 'tags' | 'models' | 'failedChecks'> & {
+export type RunEndSummary = Omit<RunListItem, 'suiteId' | 'startedAt' | 'turns' | 'tags' | 'models' | 'failedChecks' | 'notApplicableCriteria'> & {
   turns: number
 }
 
