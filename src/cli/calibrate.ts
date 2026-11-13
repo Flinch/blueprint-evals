@@ -1,13 +1,14 @@
 import { parseArgs } from 'node:util'
-import { contaminationProblem, ContaminationError, createRubricLabelJudge, evaluateJudge, formatReport } from '../calibration/evaluate.js'
-import { loadLabels, splitOf, SplitViolationError } from '../calibration/labels.js'
+import { ContaminationError, formatReport } from '../calibration/evaluate.js'
+import { loadLabels, SplitViolationError } from '../calibration/labels.js'
 import { loadConfig, loadRubric } from '../core/load.js'
 import type { ModelProvider } from '../core/interfaces.js'
+import { executeCalibration, planCalibration } from '../engine/calibrate.js'
+import { providerErrors } from '../engine/plan.js'
 import { formatUsd } from '../reporters/console.js'
 import {
   confirmSpend, configPath, DEFAULT_CONFIG, defaultProvider, orUsage, parseOrUsage, print, requireFile, UsageError, type CliIo,
 } from './common.js'
-import { buildCalibratePreview, providerErrors } from './plan.js'
 
 export const CALIBRATE_HELP = `Usage: evals calibrate --labels <file> --rubric <file> --split dev|test [options]
 
@@ -74,18 +75,14 @@ export async function calibrateCommand(argv: string[], io: CliIo): Promise<numbe
   if (problems.length > 0) throw new UsageError(problems.join('\n'))
 
   // Refuse a contaminated judge before anyone is asked to approve a spend.
-  const contamination = contaminationProblem(labels, rubric.anchors)
-  if (contamination) {
-    print(io.stderr, `${contamination}\nNothing was run and nothing was spent.`)
+  const plan = planCalibration({ config, labels, rubric, split, selection })
+  if (plan.contamination) {
+    print(io.stderr, `${plan.contamination}\nNothing was run and nothing was spent.`)
     return 2
   }
 
-  // The same selection evaluateJudge makes, so the preview's count is the real one.
-  const inSplit = labels.filter(l => splitOf(l) === split)
-  const judgements = selection === 'random' ? inSplit.filter(l => l.sampled_by === 'random').length : inSplit.length
-
   const out = (text = '') => print(io.stdout, text)
-  const preview = buildCalibratePreview(config, judgements, split, selection)
+  const preview = plan.preview
   for (const line of preview.lines) out(line)
   out()
 
@@ -103,10 +100,9 @@ export async function calibrateCommand(argv: string[], io: CliIo): Promise<numbe
     throw new UsageError(`cannot create the model provider: ${e instanceof Error ? e.message : String(e)}`)
   }
 
-  const judge = createRubricLabelJudge({ rubric, provider, effort: config.models.judge.effort, timeoutMs: config.timeouts.judgeMs })
   let report
   try {
-    report = await evaluateJudge(labels, judge, { split, selection })
+    report = await executeCalibration({ config, labels, rubric, provider, split, selection })
   } catch (e) {
     if (e instanceof ContaminationError || e instanceof SplitViolationError) {
       print(io.stderr, e.message)

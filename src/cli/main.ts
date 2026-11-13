@@ -3,6 +3,7 @@ import { FRAMEWORK_VERSION } from '../core/version.js'
 import { calibrateCommand } from './calibrate.js'
 import { print, UsageError, type CliIo } from './common.js'
 import { runCommand } from './run.js'
+import { uiCommand } from './ui.js'
 import { validateCommand } from './validate.js'
 
 export type { CliIo } from './common.js'
@@ -15,6 +16,7 @@ Commands:
   validate [path]    Check the config, scenarios and labels. Costs nothing.
   run [path]         Run scenarios and grade them. Shows a cost preview first.
   calibrate          Measure a rubric judge against human labels.
+  ui [path]          Start the local web UI (127.0.0.1 only) for runs, labelling and calibration.
 
 Run "evals <command> --help" for the options of a command.
 
@@ -25,6 +27,7 @@ const COMMANDS: Record<string, (argv: string[], io: CliIo) => Promise<number>> =
   validate: validateCommand,
   run: runCommand,
   calibrate: calibrateCommand,
+  ui: uiCommand,
 }
 
 /** Runs the CLI and returns the exit code. It never throws and never exits the process. */
@@ -66,7 +69,11 @@ export async function runCli(argv: string[], io: CliIo): Promise<number> {
 
 /** The real entry point: wires the process streams and a readline prompt, then runs. */
 export async function main(argv: string[] = process.argv.slice(2)): Promise<number> {
+  // Only `evals ui` handles Ctrl+C itself (to close the server). Every other command keeps the default.
+  const stop = new AbortController()
+  if (argv[0] === 'ui') for (const sig of ['SIGINT', 'SIGTERM'] as const) process.once(sig, () => stop.abort())
   const io: CliIo = {
+    signal: stop.signal,
     stdout: text => void process.stdout.write(text),
     stderr: text => void process.stderr.write(text),
     env: process.env,

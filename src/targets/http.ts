@@ -109,6 +109,8 @@ export function createHttpTarget(
           signal: AbortSignal.any(signals),
         })
       } catch (err) {
+        // The caller stopped the run: say so, instead of blaming the target for a timeout.
+        if (ctx.signal?.aborted) throw new Error('The run was cancelled.')
         if (err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
           throw new Error(`target "${name}" did not respond within ${config.timeoutMs}ms`)
         }

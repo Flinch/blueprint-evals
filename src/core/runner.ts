@@ -200,13 +200,19 @@ export async function runScenario(scenario: Scenario, options: RunOptions): Prom
  * Runs scenarios one at a time. `optionsFor` supplies each scenario's target,
  * simulator and graders, since those depend on the scenario (its target name,
  * its rubric). Concurrency arrives with trials in M2.
+ *
+ * With a `signal`, no further scenario is started once it aborts, and the
+ * results so far are returned.
  */
 export async function runSuite(
   scenarios: Scenario[],
   optionsFor: (scenario: Scenario) => RunOptions | Promise<RunOptions>,
+  suiteOptions: { signal?: AbortSignal } = {},
 ): Promise<RunResult[]> {
   const results: RunResult[] = []
   for (const scenario of scenarios) {
+    // Once cancelled, no further scenario is started. The one in flight ends as an error result.
+    if (suiteOptions.signal?.aborted) break
     let opts: RunOptions
     try {
       opts = await optionsFor(scenario)

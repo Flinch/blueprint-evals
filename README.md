@@ -13,8 +13,8 @@ provider (tested against a fake client; an opt-in live test is included), the
 persona and scripted simulators, the scenario loader, the runner, the
 calibration core (label files, stable splits, a contamination guard, and true
 positive and negative rates with intervals), the console and JSON reporters,
-and the command line (`evals validate`, `evals run`, `evals calibrate`). The
-webhook reporter and redaction are not built yet. See the
+and the command line (`evals validate`, `evals run`, `evals calibrate`,
+`evals ui`). The webhook reporter and redaction are not built yet. See the
 [M0 design doc](docs/design/0001-m0-core-interfaces.md) for the plan and the
 reasoning.
 
@@ -65,8 +65,9 @@ checkout, `npm run evals -- <command>` runs the TypeScript directly.
 
 ```bash
 evals validate [path] [--config file] [--labels file] [--rubric file]
-evals run [path] [--config file] [--only id1,id2] [--tag t] [--yes] [--json out.json] [--max-cost usd]
+evals run [path] [--config file] [--only id1,id2] [--tag t] [--yes] [--json out.json] [--max-cost usd] [--no-save]
 evals calibrate --labels file --rubric file --split dev|test [--selection random|all] [--config file] [--yes]
+evals ui [path] [--port n] [--config file] [--labels file] [--no-open]
 ```
 
 `path` is a scenario file or a directory (default `./scenarios`). The config
@@ -85,7 +86,8 @@ defaults to `evals.config.yaml` in the current directory. Run
   with warnings when there is no cap or a model has no price. It then asks you
   to confirm. With no terminal (CI) it refuses unless you pass `--yes`.
   Scenarios that make no model calls run without a prompt. `--json` writes
-  every result with its full trace.
+  every result with its full trace. Every run is also saved to
+  `.evals/runs/` (see [Web UI](#web-ui)); `--no-save` skips that.
 - **`calibrate`** measures a rubric judge against human labels (see
   [the judge methodology](docs/design/0002-judge-methodology.md)). It prints
   the number of judge calls first and asks the same way. The train split is
@@ -98,9 +100,45 @@ Exit codes:
 | `validate` | no errors | errors found | usage problem or file not found |
 | `run` | every run passed | a run failed or errored | usage or config problem, or not confirmed |
 | `calibrate` | measured | some labels could not be judged | usage problem, contamination, or not confirmed |
+| `ui` | stopped with Ctrl+C | | usage problem, or the port is in use |
 
 The model calls use the Anthropic API and read `ANTHROPIC_API_KEY` from the
 environment. Nothing in the test suite makes a real call.
+
+## Web UI
+
+```bash
+npx evals ui                    # or: npm run ui
+```
+
+`evals ui` starts a local web page for what the command line produces: a
+dashboard and run list over saved runs, per-run detail (transcripts, tool calls,
+check and criterion verdicts with critiques, cost, models, warnings), buttons to
+run scenarios and calibration, and a review queue where you label outputs pass or
+fail with a critique. Labels are written in the same `labels.jsonl` format that
+`evals calibrate` reads. The queue hides the judge's verdict until you have
+labelled an item, so you do not anchor on it, and it keeps at least 30 percent of
+labels randomly sampled (see [the judge methodology](docs/design/0002-judge-methodology.md)).
+
+It is local only. The server listens on `127.0.0.1`, never on a network address,
+and needs a random access token that is printed in the URL it shows at startup:
+open that URL. It also checks the `Host` and `Origin` of every request, and it
+cannot call a model until you have looked at the cost preview and confirmed that
+exact plan. The model key comes from the environment of the process that started
+the server. The page never asks for one.
+
+Data is stored under `.evals/` in the directory you start it from (listed in
+`.gitignore`):
+
+| Path | Contents |
+|---|---|
+| `.evals/runs/<suiteId>.json` | one record per suite, written by `evals run` and by runs started in the page |
+| `.evals/calibration/<id>.json` | saved calibration reports |
+| `.evals/labels.jsonl` | human labels (change it with `--labels`) |
+
+The front end is built into `dist/ui`. Until it is there, the server shows a "UI
+not built yet" page, and the JSON API still works. The API is described in
+[docs/design/0003-ui-and-api.md](docs/design/0003-ui-and-api.md).
 
 ## Develop
 

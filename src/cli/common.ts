@@ -2,6 +2,7 @@ import { existsSync, statSync } from 'node:fs'
 import { relative, resolve } from 'node:path'
 import type { Config } from '../core/config.js'
 import type { ModelProvider } from '../core/interfaces.js'
+import { UsageError } from '../engine/errors.js'
 import { createAnthropicProvider } from '../models/anthropic.js'
 
 /** Everything the CLI touches in the outside world, injectable so tests can capture it. */
@@ -18,15 +19,16 @@ export interface CliIo {
   createProvider?(config: Config): ModelProvider
   /** Passed to http targets. Defaults to the global fetch. */
   fetch?: typeof fetch
+  /** Where the `.evals/` data directory lives. Defaults to `cwd`. */
+  workdir?: string
+  /** Long-running commands (`evals ui`) stop when this aborts. The real entry point aborts it on Ctrl+C. */
+  signal?: AbortSignal
+  /** Opens a URL in the user's browser. Defaults to the platform's opener. */
+  openUrl?(url: string): void
 }
 
 /** Something the user can fix on the command line or in their files. Exit code 2. */
-export class UsageError extends Error {
-  constructor(message: string) {
-    super(message)
-    this.name = 'UsageError'
-  }
-}
+export { UsageError } from '../engine/errors.js'
 
 export const DEFAULT_CONFIG = 'evals.config.yaml'
 

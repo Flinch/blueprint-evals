@@ -19,6 +19,8 @@ export interface Harness {
 
 export interface HarnessOptions {
   cwd?: string
+  /** Where `.evals/` is written. Defaults to a fresh temporary directory when `cwd` is not given, so tests never write into the repository. */
+  workdir?: string
   env?: NodeJS.ProcessEnv
   isTTY?: boolean
   /** The answer to a confirmation. */
@@ -38,6 +40,7 @@ export function harness(options: HarnessOptions = {}): Harness {
     stderr: t => void (err += t),
     env: options.env ?? {},
     cwd: options.cwd ?? process.cwd(),
+    workdir: options.workdir ?? (options.cwd === undefined ? tempDir('evals-workdir-') : undefined),
     isTTY: options.isTTY ?? false,
     confirm: async q => {
       questions.push(q)
