@@ -72,22 +72,27 @@ export interface CalibrationReport {
   warnings: string[]
 }
 
+/**
+ * A few-shot example that matches any non-train label contaminates the
+ * evaluation, whichever split is being measured: dev and test examples must
+ * never be in the prompt. Returns the problem as a message, or null when clean.
+ * Exported so a caller can check before asking anyone to approve a spend.
+ */
+export function contaminationProblem(labels: Label[], anchors: Anchor[]): string | null {
+  const anchorKeys = new Set(anchors.map(contentKey))
+  const contaminated = labels.filter(l => splitOf(l) !== 'train' && anchorKeys.has(contentKey(l)))
+  if (contaminated.length === 0) return null
+  return `The judge's few-shot examples include labels from the dev or test split, so it would be graded on examples it was shown: ${contaminated.map(l => `${l.id} (${splitOf(l)})`).join(', ')}. Build examples from train labels only.`
+}
+
 export async function evaluateJudge(labels: Label[], judge: LabelJudge, options: EvaluateOptions): Promise<CalibrationReport> {
   const selection = options.selection ?? 'random'
   if ((options.split as string) === 'train') {
     throw new ContaminationError('Cannot evaluate on the train split: those labels may appear in the judge prompt.')
   }
 
-  // A few-shot example that matches any non-train label contaminates the
-  // evaluation, whichever split is being measured: dev and test examples must
-  // never be in the prompt.
-  const anchorKeys = new Set(judge.anchors.map(contentKey))
-  const contaminated = labels.filter(l => splitOf(l) !== 'train' && anchorKeys.has(contentKey(l)))
-  if (contaminated.length > 0) {
-    throw new ContaminationError(
-      `The judge's few-shot examples include labels from the dev or test split, so it would be graded on examples it was shown: ${contaminated.map(l => `${l.id} (${splitOf(l)})`).join(', ')}. Build examples from train labels only.`,
-    )
-  }
+  const contamination = contaminationProblem(labels, judge.anchors)
+  if (contamination) throw new ContaminationError(contamination)
 
   const inSplit = labels.filter(l => splitOf(l) === options.split)
   const eligible = selection === 'random' ? inSplit.filter(l => l.sampled_by === 'random') : inSplit

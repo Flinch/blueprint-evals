@@ -1,5 +1,5 @@
 import { parseArgs } from 'node:util'
-import { ContaminationError, createRubricLabelJudge, evaluateJudge, formatReport } from '../calibration/evaluate.js'
+import { contaminationProblem, ContaminationError, createRubricLabelJudge, evaluateJudge, formatReport } from '../calibration/evaluate.js'
 import { loadLabels, splitOf, SplitViolationError } from '../calibration/labels.js'
 import { loadConfig, loadRubric } from '../core/load.js'
 import type { ModelProvider } from '../core/interfaces.js'
@@ -72,6 +72,13 @@ export async function calibrateCommand(argv: string[], io: CliIo): Promise<numbe
   const rubric = orUsage(() => loadRubric(requireFile(io, values.rubric!, 'rubric file')))
   const problems = providerErrors(config, false, true)
   if (problems.length > 0) throw new UsageError(problems.join('\n'))
+
+  // Refuse a contaminated judge before anyone is asked to approve a spend.
+  const contamination = contaminationProblem(labels, rubric.anchors)
+  if (contamination) {
+    print(io.stderr, `${contamination}\nNothing was run and nothing was spent.`)
+    return 2
+  }
 
   // The same selection evaluateJudge makes, so the preview's count is the real one.
   const inSplit = labels.filter(l => splitOf(l) === split)

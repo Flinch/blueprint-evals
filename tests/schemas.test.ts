@@ -66,3 +66,28 @@ describe('secrets', () => {
     expect(() => resolveSecret('${env:NOPE}', {})).toThrow('NOPE')
   })
 })
+
+describe('environment references outside headers', () => {
+  const base = { models: { simulator: { model: 'm' }, judge: { model: 'm' } } }
+  const http = (over: Record<string, unknown>) => ({
+    ...base,
+    targets: { t: { kind: 'http', url: 'http://127.0.0.1:4010/chat', request: { body: { message: '{{input.text}}' } }, response: { text: '$.reply' }, ...over } },
+  })
+
+  it('accepts a reference in a header, the one place it is expanded', () => {
+    expect(ConfigSchema.safeParse(http({ headers: { Authorization: 'Bearer ${env:TOKEN}' } })).success).toBe(true)
+  })
+
+  it('rejects one in the url, because it would be sent as literal text', () => {
+    const r = ConfigSchema.safeParse(http({ url: 'http://127.0.0.1:4010/${env:PATH_PART}' }))
+    expect(r.success).toBe(false)
+    expect(JSON.stringify(r.error?.issues)).toMatch(/only expanded in headers/)
+  })
+
+  it('rejects one anywhere in the request body, naming where', () => {
+    const r = ConfigSchema.safeParse(http({ request: { body: { auth: { key: ['x', '${env:API_KEY}'] } } } }))
+    expect(r.success).toBe(false)
+    const issue = r.error?.issues.find(i => /only expanded in headers/.test(i.message))
+    expect(issue?.path).toEqual(['targets', 't', 'request', 'body', 'auth', 'key', '1'])
+  })
+})

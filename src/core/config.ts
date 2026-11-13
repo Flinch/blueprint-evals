@@ -44,6 +44,22 @@ const HeadersSchema = z.record(z.string(), z.string()).default({}).superRefine((
   }
 })
 
+// Only headers are expanded at run time. A reference anywhere else would be sent
+// to the target as literal text, so it is rejected when the config is loaded.
+const ENV_ONLY_IN_HEADERS =
+  '${env:NAME} references are only expanded in headers. Here it would be sent as literal text. Put credentials in a header, or write the value out.'
+const noEnvRef = (text: string) => !/\$\{env:/.test(text)
+
+/** Dotted paths of every string inside `value` that contains an ${env:...} reference. */
+function envRefPaths(value: unknown, path = ''): string[] {
+  if (typeof value === 'string') return noEnvRef(value) ? [] : [path]
+  if (Array.isArray(value)) return value.flatMap((v, i) => envRefPaths(v, `${path}.${i}`))
+  if (typeof value === 'object' && value !== null) {
+    return Object.entries(value).flatMap(([k, v]) => envRefPaths(v, `${path}.${k}`))
+  }
+  return []
+}
+
 const ModelConfig = z.object({
   provider: z.string().default('anthropic'),
   model: z.string(),
@@ -58,10 +74,16 @@ export const TargetConfigSchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('vapi-chat'), apiKey: secret, assistantId: z.string(), ...TargetBase }),
   z.object({
     kind: z.literal('http'),
-    url: z.string().url(),
+    url: z.string().refine(noEnvRef, ENV_ONLY_IN_HEADERS).pipe(z.string().url()),
     headers: HeadersSchema,
     timeoutMs: z.number().int().positive().default(30_000),
-    request: z.object({ body: z.record(z.string(), z.unknown()) }),
+    request: z.object({
+      body: z.record(z.string(), z.unknown()).superRefine((body, ctx) => {
+        for (const path of envRefPaths(body)) {
+          ctx.addIssue({ code: 'custom', path: path.split('.').filter(Boolean), message: ENV_ONLY_IN_HEADERS })
+        }
+      }),
+    }),
     response: z.object({
       text: z.string(),
       session: z.string().optional(),

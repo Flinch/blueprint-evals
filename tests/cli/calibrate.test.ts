@@ -136,6 +136,23 @@ describe('evals calibrate', () => {
       expect(provider.calls).toHaveLength(0)
     })
 
+    it('refuses a contaminated judge before showing the cost preview, so nobody approves a spend that will be refused', async () => {
+      const leaked = dev[0]!
+      const rubric = rubricYaml(`anchors:
+  - criterion: confirms
+    input: ${JSON.stringify(leaked.input)}
+    output: ${JSON.stringify(leaked.output)}
+    verdict: pass
+    critique: copied from a dev label
+`)
+      const h = harness({ cwd: workspace({ 'rubric.yaml': rubric }), provider: labelJudgeProvider() })
+      // No --yes and no terminal: it must refuse for contamination, not for the missing confirmation.
+      expect(await runCli([...base, '--split', 'test'], h.io)).toBe(2)
+      expect(h.stdout()).toBe('')
+      expect(h.stderr()).toMatch(/few-shot examples include labels/)
+      expect(h.stderr()).toMatch(/Nothing was run and nothing was spent/)
+    })
+
     it('exits 1, and lists them, when some labels could not be judged', async () => {
       const provider = createFakeProvider({ error: 'the model fell over' })
       const h = harness({ cwd: workspace(), provider })
