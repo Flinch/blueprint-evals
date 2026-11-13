@@ -94,7 +94,7 @@ input matters. `excerpt`, `label` and `rationale` become `output`, `verdict` and
 
 ## Part B: calibration (implemented)
 
-Code: `src/calibration/` (`labels.ts`, `metrics.ts`, `evaluate.ts`). Library only for now: there is no `evals calibrate` command until the CLI exists.
+Code: `src/calibration/` (`labels.ts`, `metrics.ts`, `evaluate.ts`). The command is `evals calibrate --labels file --rubric file --split dev|test`. It prints how many judge calls it will make and asks before making them, refuses the train split, and exits 2 on a contamination error. It exits 0 once the judge has been measured, even if the rates are low, because it is a measurement and not a gate.
 
 ### The label file
 

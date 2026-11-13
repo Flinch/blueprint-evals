@@ -99,8 +99,8 @@ src/
   simulators/  llm-persona, scripted
   graders/     deterministic, rubric-judge, goal-check, min-content
   models/      anthropic provider, fake provider, pricing
-  reporters/   console, json, webhook
-  cli/         run, validate
+  reporters/   console, json (webhook not built yet)
+  cli/         validate, run, calibrate
 docs/design/
 examples/      stub-agent, synthetic scenarios and an example config (optional Vapi example under examples/vapi/)
 ```
@@ -599,33 +599,67 @@ interface Reporter {
 }
 ```
 
-- `console`: a live line per turn and a summary table at the end.
-- `json`: writes each RunResult to a file.
-- `webhook`: posts events to a URL with a shared secret. Blueprint supplies a
-  mapping that reproduces today's `/ai-eval-runs` payload and progress posts.
-  A failed progress post never fails the run, the same rule the current
-  `reportProgress` follows.
+- `console` (implemented): a line when each run starts and ends, the failed
+  checks and criteria with the judge's critique, and a summary table at the end.
+  It writes through a function it is given, so tests can capture it.
+- `json` (implemented): writes `{ frameworkVersion, startedAt, results }`, with
+  every RunResult and its full trace, and rewrites the file after each run so a
+  suite that is stopped part-way keeps what it had.
+- `webhook` (not built yet): posts events to a URL with a shared secret.
+  Blueprint supplies a mapping that reproduces today's `/ai-eval-runs` payload
+  and progress posts. A failed progress post never fails the run, the same rule
+  the current `reportProgress` follows.
 
-A `redact(trace)` hook runs before any reporter sees the Trace, so callers can
+A `redact(trace)` hook (not built yet) runs before any reporter sees the Trace, so callers can
 strip personal data from transcripts before they are written anywhere.
 
-### CLI
+### CLI (implemented)
 
 ```
-evals validate scenarios/
-evals run examples/scenarios/ --config examples/evals.config.yaml
+evals validate [path] [--config file] [--labels file] [--rubric file]
+evals run [path] [--config file] [--only ids] [--tag t] [--yes] [--json file] [--max-cost usd]
+evals calibrate --labels file --rubric file --split dev|test [--selection random|all] [--config file] [--yes]
 ```
 
-Before running, the CLI prints what it will do and the maximum it could cost:
+Code: `src/cli/`. `runCli(argv, io)` takes an injectable `CliIo` (output, env,
+cwd, whether a terminal is attached, a confirm function, and optionally a model
+provider factory and fetch), so tests run it without a process or a network.
+
+Before running, `evals run` prints what it will do and the most it could cost:
 
 ```
-3 scenarios against "stub-agent", 1 trial each, up to 10 turns
-Simulator and judge: claude-opus-5-5. Estimated maximum cost: $0.84
+Cost preview
+  Scenarios: 3 selected, 2 call a model, 1 deterministic only
+  Simulator calls: up to 8 (claude-opus-5-5, effort low)
+  Judge calls: up to 4 (claude-opus-5-5, effort high): 2 rubric judge, 2 goal check
+  These are upper bounds. A failed deterministic check skips the judge calls, ...
+  Cost cap per scenario: $0.50 (budget.maxCostUsd in the config)
+  Worst-case total: $1.00 (2 scenarios x $0.50)
 Continue? [y/N]
 ```
 
-`--yes` skips the prompt for CI. Exit codes: `0` when every run passes, `1`
-when any run fails, `2` on an error.
+Differences from the first draft of this section:
+
+- **The worst case is the cap, not an estimate.** A dollar figure from call
+  counts alone would need a guess at tokens per call. The preview gives the
+  counts, which are exact upper bounds, and the worst-case total as scenarios
+  that call a model times the per-run cap (`budget.maxCostUsd`, or
+  `--max-cost`). With no cap it says so in a warning instead of inventing a
+  number. A used model with no price in the config is also a warning, since its
+  cost is then unknown and a cap cannot be enforced.
+- **Confirmation.** Any run that can call a model needs `--yes`, or a yes at the
+  prompt when a terminal is attached. With no terminal and no `--yes` it
+  refuses (exit 2) and runs nothing. Scenarios with no model calls skip the
+  prompt.
+- **Exit codes.** `evals run`: `0` when every run passes, `1` when any run fails
+  or errors, `2` for a usage or config problem or an unconfirmed run.
+  `evals validate`: `0` no errors, `1` errors, `2` usage. `evals calibrate`: `0`
+  when measured (low rates are a measurement, not a failure), `1` when some
+  labels could not be judged, `2` for usage, contamination or an unconfirmed
+  run.
+- **Unimplemented targets.** `vapi-chat` and `fake` parse in the config but are
+  not implemented targets yet, so a scenario that uses one is an error in both
+  `validate` and `run`.
 
 Example config:
 
@@ -763,8 +797,8 @@ depends on it by git URL.
    with the new statuses.
 8. Aggregation, plus the offline replay script.
 9. Runner, events, budgets.
-10. Reporters: `console`, `json`, `webhook`.
-11. CLI: `validate` and `run` with the cost preview.
+10. Reporters: `console` and `json` (done), `webhook` (not built yet).
+11. CLI: `validate`, `run` with the cost preview, and `calibrate` (done).
 12. Blueprint wrapper, on a feature branch in `qa-tool-server`.
 13. Vapi contract test (optional, paid, run on request).
 

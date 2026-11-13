@@ -28,7 +28,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "stub-agent": "tsx examples/stub-agent/serve.ts"
+    "stub-agent": "tsx examples/stub-agent/serve.ts",
+    "evals": "tsx src/cli/index.ts"
   },
   "repository": {
     "type": "git",

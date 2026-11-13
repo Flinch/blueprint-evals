@@ -10,12 +10,13 @@ judges, and reports a verdict you can audit.
 aggregation rule, the `http` target, the stub agent, the graders
 (deterministic checks, the rubric judge, goal check), the Anthropic model
 provider (tested against a fake client; an opt-in live test is included), the
-persona and scripted simulators, the scenario loader, the runner, and the
+persona and scripted simulators, the scenario loader, the runner, the
 calibration core (label files, stable splits, a contamination guard, and true
-positive and negative rates with intervals). The
-reporters and the CLI are next, so `evals run` does not exist yet, but
-`runScenario` works end to end from code. See the [M0 design doc](docs/design/0001-m0-core-interfaces.md) for
-the plan and the reasoning.
+positive and negative rates with intervals), the console and JSON reporters,
+and the command line (`evals validate`, `evals run`, `evals calibrate`). The
+webhook reporter and redaction are not built yet. See the
+[M0 design doc](docs/design/0001-m0-core-interfaces.md) for the plan and the
+reasoning.
 
 ## Why another eval tool
 
@@ -42,22 +43,72 @@ the test suite do not depend on any third-party agent.
   and the agent can change under you. Vapi examples live under
   `examples/vapi/` and are marked as requiring one.
 
-## Planned quickstart
+## Quickstart
 
-Not runnable yet. This is the shape the CLI is being built toward:
+The example scenarios target the stub agent, which needs no account and no key.
+The scenario with no persona, rubric or goal makes no model calls, so it runs
+for free:
 
 ```bash
-evals validate examples/scenarios/
-evals run examples/scenarios/ --config examples/evals.config.yaml
+npm run stub-agent                      # in one terminal
+npm run evals -- validate examples/scenarios --config examples/evals.config.yaml
+npm run evals -- run examples/scenarios --config examples/evals.config.yaml --only reschedule-asks-before-acting
 ```
 
-The `run` command prints the maximum it could cost before it spends anything.
+The other example scenarios use a simulated user and an LLM judge, so they call
+a model. See below.
+
+## Command line
+
+After `npm run build` the binary is `evals` (`node dist/cli/index.js`). From a
+checkout, `npm run evals -- <command>` runs the TypeScript directly.
+
+```bash
+evals validate [path] [--config file] [--labels file] [--rubric file]
+evals run [path] [--config file] [--only id1,id2] [--tag t] [--yes] [--json out.json] [--max-cost usd]
+evals calibrate --labels file --rubric file --split dev|test [--selection random|all] [--config file] [--yes]
+```
+
+`path` is a scenario file or a directory (default `./scenarios`). The config
+defaults to `evals.config.yaml` in the current directory. Run
+`evals <command> --help` for the details.
+
+- **`validate`** checks the config, the scenarios and optionally a label file.
+  It makes no model calls and costs nothing. It checks that every scenario's
+  target exists and is a kind that can run, and lists the `${env:NAME}`
+  variables the targets use, warning about any that are unset. Values are never
+  printed.
+- **`run`** plays each scenario against its target and grades it. Before
+  anything that could cost money it prints a **cost preview**: how many
+  scenarios call a model, the most simulator and judge calls there can be, the
+  models and efforts used, the per-scenario cost cap and the worst-case total,
+  with warnings when there is no cap or a model has no price. It then asks you
+  to confirm. With no terminal (CI) it refuses unless you pass `--yes`.
+  Scenarios that make no model calls run without a prompt. `--json` writes
+  every result with its full trace.
+- **`calibrate`** measures a rubric judge against human labels (see
+  [the judge methodology](docs/design/0002-judge-methodology.md)). It prints
+  the number of judge calls first and asks the same way. The train split is
+  refused. A measurement is not a gate, so low rates still exit 0.
+
+Exit codes:
+
+| Command | 0 | 1 | 2 |
+|---|---|---|---|
+| `validate` | no errors | errors found | usage problem or file not found |
+| `run` | every run passed | a run failed or errored | usage or config problem, or not confirmed |
+| `calibrate` | measured | some labels could not be judged | usage problem, contamination, or not confirmed |
+
+The model calls use the Anthropic API and read `ANTHROPIC_API_KEY` from the
+environment. Nothing in the test suite makes a real call.
 
 ## Develop
 
 ```bash
 npm install
+npm run typecheck
 npm test
+npm run build
 ```
 
 Node 20 or later.

@@ -19,7 +19,7 @@ describe('loading the examples', () => {
   it('loads every scenario, skipping the rubric files that sit beside them', () => {
     const loaded = loadScenarios(join(examples, 'scenarios'))
     expect(loaded.map(l => l.scenario.id).sort()).toEqual([
-      'asks-for-medical-advice', 'asks-to-cancel-then-declines', 'reschedule-tomorrow-3pm',
+      'asks-for-medical-advice', 'asks-to-cancel-then-declines', 'reschedule-asks-before-acting', 'reschedule-tomorrow-3pm',
     ])
   })
   it('resolves a scenario\'s rubric relative to the scenario file', () => {

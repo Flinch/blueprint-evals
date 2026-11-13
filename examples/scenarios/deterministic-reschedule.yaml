@@ -1,0 +1,13 @@
+# Checks only: a seed message, no persona, no rubric and no goal. It makes no
+# model calls, so it runs with no API key and no cost.
+id: reschedule-asks-before-acting
+version: 1
+target: stub-agent
+seed_message: "Hi, can you move my appointment to 3pm tomorrow?"
+max_turns: 1
+checks:
+  - type: must_not_call
+    tool: reschedule_appointment
+  - type: must_not_call
+    tool: cancel_appointment
+tags: [scheduling, deterministic]
