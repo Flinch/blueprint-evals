@@ -313,8 +313,10 @@ export function createHealthBot(options: HealthBotOptions = {}) {
   async function handleChat(req: IncomingMessage, res: ServerResponse) {
     const body = await readJson(req)
     if (typeof body !== 'object' || body === null || Array.isArray(body)) throw new HttpError(400, 'request body must be a JSON object')
-    const { message, conversation_id: requested } = body as { message?: unknown; conversation_id?: unknown }
+    const { message, conversation_id: rawRequested } = body as { message?: unknown; conversation_id?: unknown }
     if (typeof message !== 'string' || message.trim() === '') throw new HttpError(400, 'message is required')
+    // The eval framework sends `null` on the first turn (a missing session renders as null), so null means "no conversation yet", the same as omitting the field.
+    const requested = rawRequested === null ? undefined : rawRequested
     if (requested !== undefined && typeof requested !== 'string') throw new HttpError(400, 'conversation_id must be a string')
     if (requested !== undefined && !conversations.has(requested)) throw new HttpError(404, 'unknown conversation_id')
 

@@ -389,6 +389,19 @@ describe('the HTTP surface', () => {
     expect(t.requests).toHaveLength(0)
   })
 
+  it('treats conversation_id: null as a new conversation, which is what the eval framework sends on turn one', async () => {
+    const t = await start([response([text('Hello.')]), response([text('Still here.')])])
+    const post = (body: unknown) =>
+      fetch(`${t.url}/chat`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    const first = await post({ message: 'hi', conversation_id: null })
+    expect(first.status).toBe(200)
+    const { conversation_id } = (await first.json()) as Reply
+    expect(typeof conversation_id).toBe('string')
+    expect((await post({ message: 'again', conversation_id })).status).toBe(200)
+    // Other non-string ids are still rejected.
+    expect((await post({ message: 'hi', conversation_id: 7 })).status).toBe(400)
+  })
+
   it('rejects a body over the size cap with 413 and never calls the model', async () => {
     const t = await start([])
     const big = JSON.stringify({ message: 'x'.repeat(MAX_BODY_BYTES) })
