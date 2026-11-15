@@ -17,11 +17,15 @@
 //  - The credential comes from the SDK's default client (environment or an
 //    `ant auth login` profile). It is never read here, logged or returned.
 //  - Message text and secrets are never logged.
+//  - Tracing is opt-in and best effort (tracing.ts, LANGFUSE.md). The bot only reports
+//    what it did to a Tracer. Whether tracing is on or off, replies, status codes and
+//    tool_calls are the same.
 
 import Anthropic from '@anthropic-ai/sdk'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import { randomUUID } from 'node:crypto'
 import { buildSystemPrompt, type Defect } from './prompt.js'
+import { guardTracer, noopTracer, type Tracer, type TurnTrace } from './tracing.js'
 
 export const DEFAULT_MODEL = 'claude-haiku-5-5'
 export const MAX_BODY_BYTES = 64 * 1024
@@ -44,6 +48,8 @@ export interface HealthBotOptions {
   now?: () => Date
   /** Where operational log lines go. Never receives message text or secrets. Defaults to stderr. */
   log?: (line: string) => void
+  /** Records each conversation turn, model call and tool call. Defaults to doing nothing. */
+  tracer?: Tracer
 }
 
 export interface Appointment {
@@ -199,15 +205,35 @@ export function createHealthBot(options: HealthBotOptions = {}) {
   const log = options.log ?? ((line: string) => console.error(line))
   const conversations = new Map<string, Conversation>()
   let client = options.client
+  // Guarded, so nothing a tracer does can change a response.
+  const tracer = guardTracer(options.tracer ?? noopTracer, log)
+  const traceTags = [`defect:${options.defect ?? 'none'}`]
 
   function getClient(): ChatClient {
     // Built on first use so the server starts without credentials.
-    client ??= new Anthropic({ timeout: 60_000, maxRetries: 2 }) as unknown as ChatClient
+    // The SDK's own OpenTelemetry spans are off. Tracing goes through the Tracer, so a registered
+    // tracer provider would otherwise record every model call twice and add trace headers.
+    client ??= new Anthropic({ timeout: 60_000, maxRetries: 2, openTelemetry: false }) as unknown as ChatClient
     return client
   }
 
+  /** Runs one patient message and reports the turn to the tracer. */
+  async function runTurn(conv: Conversation, message: string, sessionId: string): Promise<{ reply: string; toolCalls: ToolCall[] }> {
+    const turn = tracer.startTurn({ sessionId, input: message, tags: traceTags, metadata: { model } })
+    let result: { reply: string; toolCalls: ToolCall[] }
+    try {
+      result = await runTurnInner(conv, message, turn)
+    } catch (err) {
+      const failure = err instanceof TurnError ? err : classifyUpstreamError(err)
+      turn.end({ status: failure.status, error: failure.message })
+      throw err
+    }
+    turn.end({ status: 200, output: result.reply, toolCallCount: result.toolCalls.length })
+    return result
+  }
+
   /** Runs one patient message through the model and the tool loop. */
-  async function runTurn(conv: Conversation, message: string): Promise<{ reply: string; toolCalls: ToolCall[] }> {
+  async function runTurnInner(conv: Conversation, message: string, turn: TurnTrace): Promise<{ reply: string; toolCalls: ToolCall[] }> {
     const system = buildSystemPrompt(options.defect, now())
     const startLength = conv.messages.length
     const startAppointment = structuredClone(conv.appointment)
@@ -225,6 +251,12 @@ export function createHealthBot(options: HealthBotOptions = {}) {
     try {
       for (let i = 0; i < MAX_TOOL_ITERATIONS; i++) {
         let response: Anthropic.Message
+        const generation = turn.generation({
+          model,
+          system,
+          messages: conv.messages.slice(),
+          modelParameters: { max_tokens: MAX_TOKENS, effort: 'low' },
+        })
         try {
           response = await getClient().messages.create({
             model,
@@ -235,10 +267,17 @@ export function createHealthBot(options: HealthBotOptions = {}) {
             output_config: { effort: 'low' },
           })
         } catch (err) {
+          generation.end({ error: err instanceof Anthropic.APIError ? `upstream error (${err.status ?? 'no status'})` : 'client error' })
           const failure = classifyUpstreamError(err)
           log(`health-bot: upstream error (${err instanceof Anthropic.APIError ? (err.status ?? 'no status') : 'client error'})`)
           throw failure
         }
+
+        generation.end({
+          output: response.content,
+          stopReason: response.stop_reason,
+          ...(response.usage ? { usage: response.usage } : {}),
+        })
 
         if (response.stop_reason === 'refusal') {
           // The turn is dropped. The conversation keeps the patient's message and a plain reply.
@@ -267,8 +306,11 @@ export function createHealthBot(options: HealthBotOptions = {}) {
         const results: Anthropic.ToolResultBlockParam[] = []
         for (const block of response.content) {
           if (block.type !== 'tool_use') continue
-          toolCalls.push({ name: block.name, args: (block.input ?? {}) as Record<string, unknown> })
+          const args = (block.input ?? {}) as Record<string, unknown>
+          toolCalls.push({ name: block.name, args })
+          const toolSpan = turn.toolCall({ name: block.name, args })
           const { status, isError } = runTool(block.name, block.input, conv)
+          toolSpan.end({ status, isError })
           results.push({
             type: 'tool_result',
             tool_use_id: block.id,
@@ -327,7 +369,7 @@ export function createHealthBot(options: HealthBotOptions = {}) {
     if (isNew) conversations.set(id, conv)
 
     // One turn at a time per conversation, in arrival order.
-    const turn = conv.tail.then(() => runTurn(conv, message))
+    const turn = conv.tail.then(() => runTurn(conv, message, id))
     conv.tail = turn.catch(() => undefined)
     try {
       const { reply, toolCalls } = await turn

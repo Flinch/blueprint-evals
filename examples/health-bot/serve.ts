@@ -9,6 +9,7 @@
 import { loadDotEnv } from '../../src/env.js'
 import { createHealthBot } from './bot.js'
 import { DEFECTS, type Defect } from './prompt.js'
+import { createTracerFromEnv } from './tracing.js'
 
 const dotenv = loadDotEnv()
 
@@ -24,9 +25,29 @@ if (!Number.isInteger(port) || port < 0 || port > 65535) {
   process.exit(2)
 }
 
-const bot = createHealthBot({ defect: defectArg as Defect | undefined })
+// Opt-in. Without both Langfuse keys this is a no-op that loads nothing.
+const tracing = await createTracerFromEnv()
+
+const bot = createHealthBot({ defect: defectArg as Defect | undefined, tracer: tracing.tracer })
 const url = await bot.listen(port)
 console.log(`health bot listening on ${url}`)
 console.log(`active defect: ${defectArg ?? 'none (correct behavior)'}`)
 console.log(`.env file: ${dotenv.found ? 'found' : 'not found (run from the blueprint-evals folder)'}`)
 console.log(`ANTHROPIC_API_KEY: ${process.env.ANTHROPIC_API_KEY ? 'set' : 'NOT SET, every chat will answer 502'}`)
+console.log(
+  tracing.enabled
+    ? `Langfuse tracing: on (${tracing.host})`
+    : tracing.failed
+      ? 'Langfuse tracing: off (could not start, see the line above)'
+      : 'Langfuse tracing: off (set LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY in .env to turn it on)',
+)
+
+// Send the last traces before exiting. Only installed when tracing is on, so an untraced bot
+// keeps the default Ctrl-C behavior. A second signal takes the default action and kills it.
+if (tracing.enabled) {
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+    process.once(signal, () => {
+      void tracing.tracer.shutdown().finally(() => process.exit(signal === 'SIGINT' ? 130 : 143))
+    })
+  }
+}
