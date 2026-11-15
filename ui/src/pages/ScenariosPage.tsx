@@ -71,6 +71,12 @@ function RubricCard({ item }: { item: RubricItem }) {
           <dt>File</dt><dd className="break">{item.file}</dd>
           <dt>Used by</dt><dd>{item.usedBy.length === 0 ? 'No scenario' : item.usedBy.join(', ')}</dd>
         </dl>
+        {r.context ? (
+          <div>
+            <div className="review-label">Reference facts (shown to the judge as ground truth)</div>
+            <div className="crit-box" style={{ whiteSpace: 'pre-wrap' }}>{r.context}</div>
+          </div>
+        ) : null}
         <div>
           <div className="review-label">Criteria</div>
           <div className="verdict-list">

@@ -45,6 +45,12 @@ describe('RubricSchema', () => {
     expect(RubricSchema.safeParse({ ...base, anchors: [{ output: 'x', verdict: 'pass', critique: '' }] }).success).toBe(false)
     expect(RubricSchema.safeParse({ ...base, anchors: [{ input: 'q', output: 'x', verdict: 'pass', critique: 'fine' }] }).success).toBe(true)
   })
+  it('takes an optional context string, and rejects an empty one', () => {
+    const base = { id: 'r', version: 1, criteria: [{ id: 'a', text: 'one' }] }
+    expect(RubricSchema.parse(base).context).toBeUndefined()
+    expect(RubricSchema.parse({ ...base, context: 'Hours 8 to 17.' }).context).toBe('Hours 8 to 17.')
+    expect(RubricSchema.safeParse({ ...base, context: '' }).success).toBe(false)
+  })
   it('defaults weight and critical', () => {
     const r = RubricSchema.parse({ id: 'r', version: 1, criteria: [{ id: 'a', text: 'one' }] })
     expect(r.criteria[0]).toMatchObject({ weight: 1, critical: false })

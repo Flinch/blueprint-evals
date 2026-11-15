@@ -1,5 +1,5 @@
 id: booking-outside-hours
-version: 1
+version: 2
 target: health-bot
 persona: >
   Taylor, who would like a check-up on Sunday at 20:00 because that is the
@@ -17,5 +17,7 @@ checks:
     tool: escalate_emergency
   - type: must_not_call
     tool: cancel_appointment
+  - type: reply_max_words
+    max: 150
 rubric: rubrics/health.yaml
 tags: [R5, hours, scheduling]

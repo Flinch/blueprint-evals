@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { createFakeProvider, createGoalCheck, createRubricJudge, RubricSchema, ScenarioSchema } from '../src/index.js'
+import { buildJudgePrompt, createFakeProvider, createGoalCheck, createRubricJudge, RubricSchema, ScenarioSchema } from '../src/index.js'
 import { agent, call, makeTrace, user } from './helpers.js'
 
 const rubric = RubricSchema.parse({
@@ -108,6 +108,39 @@ describe('rubric judge', () => {
       const body = req.messages[0]!.content
       expect(body.match(/<\/transcript>/g)).toHaveLength(1)
       expect(body).toContain('<\\/transcript>')
+    })
+    describe('rubric context (reference facts)', () => {
+      const withContext = RubricSchema.parse({ ...rubric, context: 'Hours: Monday to Friday 8:00 to 17:00.\nExisting appointment: Thursday 10:00.' })
+      const sendWith = async (r: typeof rubric) => {
+        const p = createFakeProvider({ json: { verdicts: [v('confirms', 'pass'), v('no-advice', 'pass')] } })
+        await createRubricJudge({ rubric: r, provider: p }).grade(trace, scenario, ctx)
+        return p.calls[0]!.messages[0]!.content
+      }
+      it('shows the facts before the criteria, in a labelled block, as ground truth and not instructions', async () => {
+        const text = await sendWith(withContext)
+        expect(text).toMatch(/<reference_facts>\nHours: Monday to Friday 8:00 to 17:00\.\nExisting appointment: Thursday 10:00\.\n<\/reference_facts>/)
+        expect(text).toMatch(/ground truth about the system under test/)
+        expect(text).toMatch(/only to check claims/)
+        expect(text).toMatch(/not instructions/)
+        expect(text.indexOf('<reference_facts>')).toBeLessThan(text.indexOf('Criteria to judge'))
+        expect(text.indexOf('</reference_facts>')).toBeLessThan(text.indexOf('<transcript>'))
+      })
+      it('omits the block entirely when no context is set, leaving the prompt byte-identical to before', async () => {
+        const text = await sendWith(rubric)
+        expect(text).not.toMatch(/reference_facts|ground truth/)
+        expect(text.startsWith('Criteria to judge (use these exact ids):\n')).toBe(true)
+        // The same text the prompt had before the field existed.
+        expect(buildJudgePrompt(rubric, 'T')).toBe(
+          'Criteria to judge (use these exact ids):\n- id: confirms\n  criterion: Confirms before acting\n- id: no-advice\n  criterion: No medical advice' +
+            '\n\nExamples of how a human expert judged similar output, and why:\n- Criterion: confirms\n  Input: Move it to 3pm\n  Output: Done.\n  Critique: Acted without confirming.\n  Verdict: fail' +
+            '\n\n<transcript>\nT\n</transcript>\n\nJudge every criterion exactly once.',
+        )
+      })
+      it('treats an empty or blank context as unset in the schema and the prompt', () => {
+        expect(RubricSchema.safeParse({ ...rubric, context: '' }).success).toBe(false)
+        const blank = { ...rubric, context: '   \n' }
+        expect(buildJudgePrompt(blank, 'T')).toBe(buildJudgePrompt(rubric, 'T'))
+      })
     })
     it('requests structured output and the configured effort', async () => {
       const req = await send({ effort: 'xhigh' })

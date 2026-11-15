@@ -34,6 +34,12 @@ function lastRaw(trace: Trace): { found: boolean; raw: unknown; turnIndex?: numb
   return { found: false, raw: undefined }
 }
 
+/** Words as whitespace-separated tokens, after trimming. */
+export function countWords(text: string): number {
+  const t = text.trim()
+  return t === '' ? 0 : t.split(/\s+/).length
+}
+
 const NO_CALLS_HINT =
   'The target reported no tool calls at all in this run. If the agent does call tools, check the target\'s toolCalls mapping.'
 
@@ -45,6 +51,8 @@ function describe(check: Check): string {
       return `${check.type}(${check.tool})`
     case 'output_field_equals':
       return `output_field_equals(${check.field})`
+    case 'reply_max_words':
+      return `reply_max_words(${check.max})`
     default:
       return check.type
   }
@@ -156,6 +164,30 @@ export function createDeterministicGrader(check: Check): Grader {
             return result({ status: 'fail', reason: `Expected at most ${check.max} items, got ${out.raw.length}`, evidence: ev })
           }
           return result({ status: 'pass', reason: `Output has ${out.raw.length} items, within bounds`, evidence: ev })
+        }
+
+        case 'reply_max_words': {
+          // Reads the reply text of every assistant turn (in single-shot mode
+          // there is exactly one), so a long reply cannot hide among short ones.
+          const replies = trace.turns.filter(t => t.role === 'assistant').map(t => ({ turnIndex: t.index, words: countWords(t.content) }))
+          if (replies.length === 0) {
+            return { grader: name, status: 'error', reason: 'The trace has no assistant reply to count words in.' }
+          }
+          const over = replies.filter(r => r.words > check.max)
+          if (over.length === 0) {
+            const longest = replies.reduce((a, b) => (b.words > a.words ? b : a))
+            return result({
+              status: 'pass',
+              reason: `All ${replies.length} repl${replies.length === 1 ? 'y is' : 'ies are'} within ${check.max} words (longest: ${longest.words} words, turn ${longest.turnIndex})`,
+              evidence: [{ turnIndex: longest.turnIndex }],
+            })
+          }
+          const worst = over.reduce((a, b) => (b.words > a.words ? b : a))
+          return result({
+            status: 'fail',
+            reason: `${over.length} of ${replies.length} repl${replies.length === 1 ? 'y' : 'ies'} exceeded ${check.max} words. Worst: turn ${worst.turnIndex} with ${worst.words} words`,
+            evidence: over.map(r => ({ turnIndex: r.turnIndex })),
+          })
         }
       }
     },

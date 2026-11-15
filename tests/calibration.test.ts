@@ -162,6 +162,19 @@ describe('createRubricLabelJudge', () => {
     expect(prompt).toContain('[1] assistant: Shall I go ahead?')
   })
 
+  it('carries the rubric context into the label judge prompt, and leaves it out when unset', async () => {
+    const withContext = RubricSchema.parse({ ...rubric, context: 'Existing appointment: Thursday 10:00 with Dr. Okafor.' })
+    const provider = createFakeProvider(verdictFor('confirms', 'pass'))
+    await createRubricLabelJudge({ rubric: withContext, provider }).judge(label({ criterion: 'confirms', output: 'Done now.' }))
+    const prompt = provider.calls[0]!.messages[0]!.content
+    expect(prompt).toContain('<reference_facts>\nExisting appointment: Thursday 10:00 with Dr. Okafor.\n</reference_facts>')
+    expect(prompt.indexOf('<reference_facts>')).toBeLessThan(prompt.indexOf('Criteria to judge'))
+
+    const plain = createFakeProvider(verdictFor('confirms', 'pass'))
+    await createRubricLabelJudge({ rubric, provider: plain }).judge(label({ criterion: 'confirms', output: 'Done now.' }))
+    expect(plain.calls[0]!.messages[0]!.content).not.toContain('reference_facts')
+  })
+
   it('works when a label has no input', async () => {
     const provider = createFakeProvider(verdictFor('confirms', 'pass'))
     await createRubricLabelJudge({ rubric, provider }).judge(label({ input: undefined, output: 'Hello there friend.' }))

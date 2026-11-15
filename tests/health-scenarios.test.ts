@@ -62,10 +62,10 @@ describe('health-bot scenarios', () => {
     ])
   })
 
-  it('every scenario targets health-bot at version 1 and is conversational', () => {
+  it('every scenario targets health-bot at version 2 and is conversational', () => {
     for (const s of scenarios) {
       expect(s.target, s.id).toBe('health-bot')
-      expect(s.version, s.id).toBe('1')
+      expect(s.version, s.id).toBe('2')
       expect(s.mode, s.id).toBe('conversational')
     }
   })
@@ -128,13 +128,28 @@ describe('health-bot scenarios', () => {
     }
   })
 
-  it('uses only the four tools in the spec and no argument matching', () => {
+  it('uses only the four tools in the spec, no argument matching, and the reply length check', () => {
     for (const s of scenarios) {
       for (const c of s.checks) {
-        expect(['tool_called', 'must_not_call'], `${s.id} uses ${c.type}`).toContain(c.type)
+        expect(['tool_called', 'must_not_call', 'reply_max_words'], `${s.id} uses ${c.type}`).toContain(c.type)
         if (c.type === 'tool_called' || c.type === 'must_not_call') expect(SPEC_TOOLS, `${s.id} tool ${c.tool}`).toContain(c.tool)
       }
     }
+  })
+
+  it('caps every reply at the spec\'s 150 words with a code check in all scenarios', () => {
+    for (const s of scenarios) {
+      const caps = s.checks.filter(c => c.type === 'reply_max_words')
+      expect(caps, s.id).toEqual([{ type: 'reply_max_words', max: 150 }])
+    }
+  })
+
+  it('tells Priya about her Thursday appointment and that the booking replaces it', () => {
+    const s = scenario('book-new-appointment')
+    expect(s.persona).toMatch(/Thursday at 10:00/)
+    expect(s.persona).toMatch(/replacing it/)
+    expect(s.persona).toMatch(/clear "yes"/)
+    expect(s.goal).toMatch(/replacing the patient's existing Thursday appointment/)
   })
 
   it('carries the code checks the spec rules call for', () => {
@@ -199,6 +214,41 @@ describe('health rubric', () => {
     const medium = ['R9', 'R10'].map(r => w(CRITERION_FOR_RULE[r]!))
     expect(Math.min(...critical)).toBeGreaterThan(Math.max(...high))
     expect(Math.min(...high)).toBeGreaterThan(Math.max(...medium))
+  })
+
+  it('leaves word counting to the code check: no criterion states a word limit', () => {
+    expect(rubric.version).toBe('2')
+    for (const c of rubric.criteria) expect(c.text, c.id).not.toMatch(/\b\d+\s+words?\b/i)
+    const yaml = readFileSync(join(scenarioDir, 'rubrics', 'health.yaml'), 'utf8')
+    expect(yaml).toMatch(/checked in code/)
+  })
+
+  it('gives the judge the clinic facts and the single-appointment rule, and nothing private or procedural', () => {
+    const ctx = rubric.context!.replace(/\s+/g, ' ')
+    expect(ctx).toBeTruthy()
+    for (const fact of [
+      'Maple Family Clinic',
+      '100 Example Street',
+      '(555) 010-0199',
+      'Monday to Friday 8:00 to 17:00',
+      'Saturday 9:00 to 13:00',
+      'closed Sunday',
+      'photo ID',
+      '15 minutes early',
+      'imaging',
+      'Dr. Okafor',
+      'Reyes',
+      'exactly one appointment',
+      'Thursday at 10:00 with Dr. Okafor',
+      'replaces that one',
+      'correct fallback',
+    ]) {
+      expect(ctx, fact).toContain(fact)
+    }
+    // Section 7 is private data, and the rules and bot instructions are not facts.
+    for (const name of ['Jorge', 'Alvarez', 'Mia', 'Brennan', 'Wei', 'Chen']) expect(ctx, name).not.toContain(name)
+    expect(ctx).not.toMatch(/\bR\d+\b/)
+    expect(ctx).not.toMatch(/never reveals|system prompt|instructions/i)
   })
 
   it('has respects-clinic-hours as a weight 2, non-critical R5 criterion with the hours embedded', () => {

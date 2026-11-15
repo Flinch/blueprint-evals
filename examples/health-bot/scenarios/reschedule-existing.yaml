@@ -1,5 +1,5 @@
 id: reschedule-existing
-version: 1
+version: 2
 target: health-bot
 persona: >
   Sam, a patient who holds an appointment on Thursday at 10:00 and needs to move
@@ -14,5 +14,7 @@ checks:
     tool: reschedule_appointment
   - type: must_not_call
     tool: cancel_appointment
+  - type: reply_max_words
+    max: 150
 rubric: rubrics/health.yaml
 tags: [R5, scheduling, happy-path]

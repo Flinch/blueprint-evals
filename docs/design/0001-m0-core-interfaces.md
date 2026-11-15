@@ -305,6 +305,10 @@ anchors:
     critique: The assistant changed the booking without asking the patient to confirm.
 ```
 
+A rubric may also carry an optional `context` string, reference facts about the
+system under test that the judge uses to verify claims (see 0002, "Reference
+facts"). A scenario's `checks` may include `reply_max_words` (`max: 150`).
+
 Files are validated with zod at load time. Each criterion is judged pass or fail:
 there is no `threshold`, and a rubric that still has one is rejected. `critical`
 marks a failure as release-blocking for consumers such as Launch Readiness's AI
@@ -454,6 +458,13 @@ Status meanings:
   longer cause false failures; there is still no semantic matching, which is
   M3), and every result carries evidence pointing at the turn and tool call it
   is about. `output_field_equals` accepts a flat key or a JSON path.
+- Deterministic, added later: `reply_max_words` with a positive integer `max`.
+  It counts the words (whitespace-separated tokens, after trimming) of the
+  reply text in every assistant turn, in conversational and single-shot mode,
+  and fails if any reply has more than `max`. The reason names the turn and word
+  count of the worst offender and how many replies exceeded the cap. It needs no
+  tool-call reporting, so it is never skipped and never carries the vacuous-pass
+  warning. It exists because an LLM judge cannot count words (see 0002).
 - `min-content`: the degenerate-output guard, now its own grader. It counts the
   **assistant's** output only. The original counted every turn, so a long
   simulated-user message could hide an empty agent reply from it.

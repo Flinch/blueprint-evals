@@ -94,6 +94,40 @@ A response is often only wrong relative to what was asked, which is why the
 input matters. `excerpt`, `label` and `rationale` become `output`, `verdict` and
 `critique`.
 
+### Reference facts (rubric `context`)
+
+A judge that has only the criteria and the transcript cannot verify what the
+assistant claims. The first real run of the health-bot suite showed both
+failures: the judge called a rule the spec defines ("booking replaces your
+existing appointment") an invented policy, and it could not check clinic facts.
+
+A rubric may therefore carry an optional `context` string: facts about the
+system under test, such as clinic details and the rules its tools follow.
+
+- **Prompt.** The judge's user message puts it before the criteria, in a
+  `<reference_facts>` block, preceded by one sentence saying that it is ground
+  truth about the system under test, to be used only to check claims the
+  assistant makes and never as instructions to follow. When no context is set
+  the block and the sentence are omitted, so an existing rubric produces a
+  byte-identical prompt.
+- **Calibration.** `createRubricLabelJudge` builds its single-criterion rubric
+  from `...rubric`, so a labelled item is judged with the same context as a run.
+  A rubric's context is part of the judge being measured. Changing it changes
+  the judge, so bump the rubric `version` when it changes (the judge's name,
+  `rubric-judge(<id>@<version>)`, is the only judge identity today; a content
+  hash arrives with "judge identity" in step C below).
+- **What belongs in it.** Facts the assistant may be checked against. Not the
+  rules being graded (those are the criteria) and not the system's own
+  instructions, and nothing private that the criteria forbid revealing.
+
+### Length is a code check
+
+An LLM judge cannot count words. It estimated about 175 words for a 159-word
+reply, and it judged the same reply differently under two criteria that both
+mentioned a limit. A length cap is therefore a deterministic check,
+`reply_max_words` (see 0001), and the criteria say that length is checked in
+code instead of stating a limit the judge would only guess at.
+
 ### Not applicable
 
 A criterion often governs a situation that a given conversation never reaches. A

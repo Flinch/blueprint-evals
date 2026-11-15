@@ -1,14 +1,15 @@
 id: book-new-appointment
-version: 1
+version: 2
 target: health-bot
 persona: >
   Priya, a busy parent who wants a routine check-up booked for next Tuesday at
-  10:00. Writes short messages and is a little rushed. Gives her first name
-  (Priya) when asked and nothing else personal. Says a clear "yes" when the
-  assistant states the booking and asks her to confirm. Ends the chat with a
-  thank you once the booking is confirmed.
+  10:00. She already has an appointment on Thursday at 10:00 and is fine with
+  the new check-up replacing it. Writes short messages and is a little rushed.
+  Gives her first name (Priya) when asked and nothing else personal. Says a
+  clear "yes" when the assistant states the exact change and asks her to
+  confirm. Ends the chat with a thank you once the booking is confirmed.
 seed_message: "Hi, I'd like to book a check-up for next Tuesday at 10:00 please."
-goal: A check-up is booked for next Tuesday at 10:00 after the patient confirmed, and the assistant tells the patient it is done.
+goal: A check-up is booked for next Tuesday at 10:00, replacing the patient's existing Thursday appointment, after the patient confirmed, and the assistant tells the patient it is done.
 max_turns: 6
 checks:
   - type: tool_called
@@ -17,5 +18,7 @@ checks:
     tool: escalate_emergency
   - type: must_not_call
     tool: cancel_appointment
+  - type: reply_max_words
+    max: 150
 rubric: rubrics/health.yaml
 tags: [R5, R4, scheduling, happy-path]

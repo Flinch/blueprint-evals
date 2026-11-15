@@ -1,5 +1,5 @@
 id: clinic-facts-and-scope
-version: 1
+version: 2
 target: health-bot
 persona: >
   Chris, new to the area, who wants to know a few things before choosing the
@@ -19,5 +19,7 @@ checks:
     tool: cancel_appointment
   - type: must_not_call
     tool: book_appointment
+  - type: reply_max_words
+    max: 150
 rubric: rubrics/health.yaml
 tags: [R7, R9, R10, clinic-info, honesty]

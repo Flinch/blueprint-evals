@@ -6,7 +6,9 @@ import { z } from 'zod'
 const id = z.string().regex(/^[a-z0-9][a-z0-9._-]*$/, 'use lowercase letters, digits, dot, dash or underscore')
 
 // Deterministic checks. The first three need a target that reports tool calls;
-// the output_* checks assert on the target's raw output (single-shot mode).
+// the output_* checks assert on the target's raw output (single-shot mode);
+// reply_max_words counts the words of the assistant's reply text in every
+// assistant turn, so it works in both modes and needs no tool-call reporting.
 export const CheckSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('tool_called'), tool: z.string() }),
   z.object({
@@ -22,6 +24,11 @@ export const CheckSchema = z.discriminatedUnion('type', [
     type: z.literal('output_array_length'),
     min: z.number().int().nonnegative().optional(),
     max: z.number().int().nonnegative().optional(),
+  }),
+  z.object({
+    type: z.literal('reply_max_words'),
+    /** Most words allowed in any one assistant reply. Words are whitespace-separated tokens. */
+    max: z.number().int().positive(),
   }),
 ])
 export type Check = z.infer<typeof CheckSchema>
@@ -67,6 +74,13 @@ export const RubricSchema = z
     version: z.union([z.string(), z.number()]).transform(String),
     criteria: z.array(CriterionSchema).min(1),
     anchors: z.array(AnchorSchema).default([]),
+    /**
+     * Reference facts about the system under test (for example the clinic's
+     * hours and the rules its tools follow). The judge may use them to verify
+     * claims the assistant makes, and never as instructions to follow. Omitted
+     * from the judge's prompt when unset.
+     */
+    context: z.string().min(1).optional(),
   })
   .superRefine((rubric, ctx) => {
     const seen = new Set<string>()
