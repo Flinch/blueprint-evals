@@ -220,6 +220,7 @@ export const queueItem = (over: Partial<QueueItem> = {}): QueueItem => ({
   suiteId: 's3',
   runId: 'run-fail-1',
   scenarioId: 'asks-to-cancel-then-declines',
+  startedAt: '2026-11-12T10:00:00.000Z',
   criterion: { id: 'confirms-before-acting', text: 'Asks the user to confirm before changing the appointment.', critical: false },
   input: 'I think I need to cancel my appointment.',
   output: 'Okay, I have cancelled it for you.',

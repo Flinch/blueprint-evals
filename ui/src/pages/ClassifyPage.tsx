@@ -17,7 +17,8 @@ import { readStored, writeStored } from '../lib/storage'
 export const LABELER_KEY = 'evals-ui-labeler'
 export const MAX_CRITIQUE = 20_000
 export const MAX_LABELER = 100
-const PAGE_SIZE = 25
+// The server's largest page. The picker lists the whole queue, so ask for all it will give.
+const QUEUE_LIMIT = 200
 
 export interface FormErrors {
   verdict?: string
@@ -84,6 +85,133 @@ function LabelledSummary({ stats }: { stats: LabelStats | null }) {
   )
 }
 
+// ------------------------------------------------------------- jump to an item
+
+// The picker lists exactly the items the queue returned, in an order that says
+// nothing about the judge: scenario id, then criterion id, then run time. It never
+// uses `reason`, the judge's outcome or the queue position, and no entry text
+// contains them. The server still decides what may be labelled.
+
+export interface PickerEntry {
+  itemId: string
+  scenarioId: string
+  /** What an option shows under its scenario heading: criterion, critical marker, run and date. */
+  label: string
+}
+export interface PickerGroup {
+  scenarioId: string
+  entries: PickerEntry[]
+}
+
+/** A UUID run id is too long to read, and its first eight characters tell runs apart. */
+export function shortRunId(runId: string): string {
+  return runId.slice(0, 8)
+}
+
+export function pickerLabel(item: QueueItem): string {
+  const parts = [item.criterion.id + (item.criterion.critical ? ' (Critical)' : ''), `run ${shortRunId(item.runId)}`]
+  if (item.startedAt) parts.push(shortDate(item.startedAt))
+  return parts.join(' \u00b7 ')
+}
+
+const cmp = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0)
+
+/** Scenario id, criterion id, run time, then run id and item id so equal times still sort the same way every time. */
+export function sortForPicker(items: QueueItem[]): QueueItem[] {
+  return [...items].sort(
+    (a, b) =>
+      cmp(a.scenarioId, b.scenarioId) || cmp(a.criterion.id, b.criterion.id) || cmp(a.startedAt ?? '', b.startedAt ?? '') || cmp(a.runId, b.runId) || cmp(a.itemId, b.itemId),
+  )
+}
+
+/**
+ * The picker's entries grouped by scenario. A filter keeps entries whose scenario or label contains every word,
+ * and `keepId` (the current item) stays in whatever the filter says, so the select always has its own value.
+ */
+export function pickerGroups(items: QueueItem[], filter = '', keepId?: string): PickerGroup[] {
+  const words = filter.trim().toLowerCase().split(/\s+/).filter(Boolean)
+  const groups: PickerGroup[] = []
+  for (const item of sortForPicker(items)) {
+    const label = pickerLabel(item)
+    const hay = `${item.scenarioId} ${label}`.toLowerCase()
+    if (item.itemId !== keepId && !words.every(w => hay.includes(w))) continue
+    let g = groups[groups.length - 1]
+    if (!g || g.scenarioId !== item.scenarioId) {
+      g = { scenarioId: item.scenarioId, entries: [] }
+      groups.push(g)
+    }
+    g.entries.push({ itemId: item.itemId, scenarioId: item.scenarioId, label })
+  }
+  return groups
+}
+
+/** "Item N of M": the item's place in the picker's order among the loaded items, or null when it is not loaded. */
+export function pickerPosition(items: QueueItem[], itemId: string): { n: number; of: number } | null {
+  const i = sortForPicker(items).findIndex(x => x.itemId === itemId)
+  return i < 0 ? null : { n: i + 1, of: items.length }
+}
+
+/** The item with this id first and the others in their order. The same list when the id is not in it. */
+export function moveToFront(items: QueueItem[], itemId: string): QueueItem[] {
+  const i = items.findIndex(x => x.itemId === itemId)
+  if (i <= 0) return items
+  return [items[i]!, ...items.slice(0, i), ...items.slice(i + 1)]
+}
+
+/** `#/classify?item=<id>` opens the queue with that item current when it is in the loaded list. */
+export function applyDeepLink(items: QueueItem[], itemId: string | undefined | null): { items: QueueItem[]; found: boolean } {
+  if (!itemId) return { items, found: false }
+  if (!items.some(x => x.itemId === itemId)) return { items, found: false }
+  return { items: moveToFront(items, itemId), found: true }
+}
+
+/** Something typed or chosen that switching items would throw away. */
+export function hasDraft(v: { verdict: 'pass' | 'fail' | null; critique: string }): boolean {
+  return v.verdict !== null || v.critique.trim() !== ''
+}
+
+function ItemPicker({
+  items, currentId, disabled, capped, onPick,
+}: {
+  items: QueueItem[]
+  currentId: string
+  disabled: boolean
+  capped: { shown: number; pending: number } | null
+  onPick(itemId: string): void
+}) {
+  const [filter, setFilter] = useState('')
+  const groups = useMemo(() => pickerGroups(items, filter, currentId), [items, filter, currentId])
+  const others = groups.reduce((n, g) => n + g.entries.filter(e => e.itemId !== currentId).length, 0)
+  const showFilter = items.length > 12
+  return (
+    <div className="card-sm" role="group" aria-label="Jump to an item">
+      <div className="filters" style={{ marginBottom: 0 }}>
+        <div className="form-group wide">
+          <label className="form-label" htmlFor="item-picker">Jump to an item</label>
+          <select id="item-picker" className="form-select" value={currentId} disabled={disabled} onChange={e => onPick(e.target.value)}>
+            {groups.map(g => (
+              <optgroup key={g.scenarioId} label={g.scenarioId}>
+                {g.entries.map(e => <option key={e.itemId} value={e.itemId}>{e.label}</option>)}
+              </optgroup>
+            ))}
+          </select>
+        </div>
+        {showFilter ? (
+          <div className="form-group">
+            <label className="form-label" htmlFor="item-filter">Filter the list</label>
+            <input id="item-filter" type="search" className="form-input" value={filter} onChange={e => setFilter(e.target.value)} placeholder="Scenario, criterion, run" />
+          </div>
+        ) : null}
+      </div>
+      <p className="form-hint" aria-live="polite">
+        Listed by scenario, then criterion, then run time.{' '}
+        {filter.trim() !== '' ? `${others} other ${others === 1 ? 'item matches' : 'items match'} the filter. ` : ''}
+        {capped ? `The list shows ${capped.shown} of the ${capped.pending} items up for review. The rest load when this batch is done.` : ''}
+      </p>
+    </div>
+  )
+}
+
 // ---------------------------------------------------------------- reveal view
 
 export function RevealView({ reveal }: { reveal: RevealResponse }) {
@@ -132,8 +260,8 @@ export function RevealView({ reveal }: { reveal: RevealResponse }) {
 
 // --------------------------------------------------------------- queue screen
 
-export function QueueView() {
-  const queue = useAsync(() => api.queue(PAGE_SIZE), [])
+export function QueueView({ itemId }: { itemId?: string } = {}) {
+  const queue = useAsync(() => api.queue(QUEUE_LIMIT), [])
   const labels = useAsync(() => api.labels(), [])
   const [items, setItems] = useState<QueueItem[]>([])
   const [stats, setStats] = useState<QueueStats | null>(null)
@@ -149,14 +277,25 @@ export function QueueView() {
   const [problem, setProblem] = useState<string | null>(null)
   const [showContext, setShowContext] = useState(false)
   const [skipped, setSkipped] = useState(0)
+  const [linkMissing, setLinkMissing] = useState(false)
   const critiqueRef = useRef<HTMLTextAreaElement>(null)
+  // The deep-link id that has been acted on, so a reload of the list does not move that item to the front again.
+  const linkHandled = useRef<string | undefined>(undefined)
 
   // Take a fresh page from the server on load and whenever the local page runs out.
   useEffect(() => {
     if (queue.data) {
-      setItems(queue.data.items)
+      let list = queue.data.items
+      if (itemId && linkHandled.current !== itemId) {
+        const r = applyDeepLink(list, itemId)
+        list = r.items
+        setLinkMissing(!r.found)
+        linkHandled.current = itemId
+      }
+      setItems(list)
       setStats(queue.data.stats)
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [queue.data])
   useEffect(() => {
     if (labels.data) setLabelStats(labels.data.stats)
@@ -177,6 +316,31 @@ export function QueueView() {
     setShowContext(false)
   }
 
+  // Make a listed item the current one. The others keep their order behind it. A typed draft is not thrown away without asking.
+  const jumpTo = (id: string) => {
+    if (!current || id === current.itemId || phase === 'saving') return
+    if (phase === 'edit' && hasDraft({ verdict, critique }) && !window.confirm('Switch to another item? What you chose or typed for this one will be discarded.')) return
+    // After a save the current item has its label already, so it leaves the list as it does on Next.
+    const labelled = phase !== 'edit'
+    setItems(prev => moveToFront(labelled ? prev.filter(x => x.itemId !== current.itemId) : prev, id))
+    setLinkMissing(false)
+    resetForm()
+  }
+
+  // The address changed while the page is open (a new #/classify?item=... link).
+  useEffect(() => {
+    if (!itemId) {
+      linkHandled.current = undefined
+      setLinkMissing(false)
+      return
+    }
+    if (!queue.data || linkHandled.current === itemId) return
+    linkHandled.current = itemId
+    if (applyDeepLink(items, itemId).found) jumpTo(itemId)
+    else setLinkMissing(true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [itemId])
+
   const next = useCallback(() => {
     setItems(prev => prev.slice(1))
     resetForm()
@@ -196,7 +360,7 @@ export function QueueView() {
   }, [current, phase])
 
   const refreshStats = () => {
-    api.queue(PAGE_SIZE).then(q => setStats(q.stats)).catch(() => {})
+    api.queue(QUEUE_LIMIT).then(q => setStats(q.stats)).catch(() => {})
     api.labels().then(l => setLabelStats(l.stats)).catch(() => {})
   }
 
@@ -293,6 +457,9 @@ export function QueueView() {
 
   const total = sessionDone + items.length
   const showErrors = tried
+  const position = current ? pickerPosition(items, current.itemId) : null
+  // The server returns at most QUEUE_LIMIT items. More up for review than are loaded means the list is capped.
+  const capped = stats && stats.pending > items.length ? { shown: items.length, pending: stats.pending } : null
 
   return (
     <div className="stack">
@@ -301,6 +468,13 @@ export function QueueView() {
         <LabelledSummary stats={labelStats} />
       </div>
       {queue.data?.notes.length ? <Banner kind="info"><ul>{queue.data.notes.map((n, i) => <li key={i}>{n}</li>)}</ul></Banner> : null}
+
+      {linkMissing ? (
+        <Banner kind="info" role="status">
+          That item is not in the review queue. It may already have a label, or it is not up for review.
+          {capped ? ` Only the first ${plural(capped.shown, 'item')} of the queue are listed, so it may be further down.` : ''} Showing the normal first item instead.
+        </Banner>
+      ) : null}
 
       {!current ? (
         <div className="card">
@@ -312,13 +486,15 @@ export function QueueView() {
         <>
           <div>
             <div className="row-between small" style={{ marginBottom: '0.3rem' }}>
-              <span aria-live="polite">{sessionDone} labelled this session, {items.length} left in this batch{stats ? `, ${stats.pending} up for review in total` : ''}</span>
+              <span aria-live="polite">{position ? `Item ${position.n} of ${position.of} \u00b7 ` : ''}{sessionDone} labelled this session, {items.length} left in this batch{stats ? `, ${stats.pending} up for review in total` : ''}</span>
               <span className="muted">{hint}</span>
             </div>
             <div className="progress-track" role="progressbar" aria-label="Review progress" aria-valuemin={0} aria-valuemax={total} aria-valuenow={sessionDone}>
               <div className="progress-fill" style={{ width: `${total === 0 ? 0 : (sessionDone / total) * 100}%` }} />
             </div>
           </div>
+
+          <ItemPicker items={items} currentId={current.itemId} disabled={phase === 'saving'} capped={capped} onPick={jumpTo} />
 
           <article className="review-panel" aria-label="Item to label">
             <div className="review-section">
@@ -582,7 +758,7 @@ export function LabelsView() {
 
 // ------------------------------------------------------------------ the page
 
-export function ClassifyPage({ tab, onTab }: { tab: 'queue' | 'labels'; onTab(t: 'queue' | 'labels'): void }) {
+export function ClassifyPage({ tab, onTab, itemId }: { tab: 'queue' | 'labels'; onTab(t: 'queue' | 'labels'): void; itemId?: string }) {
   return (
     <>
       <PageHead
@@ -599,7 +775,7 @@ export function ClassifyPage({ tab, onTab }: { tab: 'queue' | 'labels'; onTab(t:
         ]}
       />
       <div role="tabpanel" id={`panel-${tab}`} aria-labelledby={`tab-${tab}`}>
-        {tab === 'queue' ? <QueueView /> : <LabelsView />}
+        {tab === 'queue' ? <QueueView itemId={itemId} /> : <LabelsView />}
       </div>
     </>
   )

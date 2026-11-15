@@ -206,7 +206,7 @@ describe('review queue', () => {
     expect(text).not.toMatch(/"verdict"/)
     expect(text).not.toMatch(/"judge/i)
     for (const item of queue.items) {
-      expect(Object.keys(item).sort()).toEqual(['context', 'criterion', 'group', 'input', 'itemId', 'output', 'outputTurn', 'reason', 'runId', 'scenarioId', 'suiteId'])
+      expect(Object.keys(item).sort()).toEqual(['context', 'criterion', 'group', 'input', 'itemId', 'output', 'outputTurn', 'reason', 'runId', 'scenarioId', 'startedAt', 'suiteId'])
       expect(Object.keys(item.criterion).sort()).toEqual(['critical', 'id', 'text'])
     }
   })

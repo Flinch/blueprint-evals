@@ -61,6 +61,29 @@ describe('GET /api/queue', () => {
     expect(body.items.find(i => i.criterion.id === 'no-medical-advice')!.criterion.critical).toBe(true)
   })
 
+  it('carries when the run started, so several runs of one scenario can be told apart', async () => {
+    const f = await seeded(3)
+    const items = (await queue(f, '?limit=100')).items
+    expect(items.length).toBeGreaterThan(0)
+    for (const item of items) expect(new Date(item.startedAt).toISOString()).toBe(item.startedAt)
+  })
+
+  it('does not change how an item is sampled with the page size: sampled_by comes from the whole plan', async () => {
+    const f = await seeded()
+    const small = (await queue(f, '?limit=5')).items
+    const large = (await queue(f, '?limit=200')).items
+    expect(large.length).toBeGreaterThan(small.length)
+    // An item in both pages has the same reason in each.
+    for (const s of small) expect(large.find(l => l.itemId === s.itemId)?.reason).toBe(s.reason)
+    // Labelling an item that only the large page lists records the plan's answer, with no limit involved.
+    const onlyLarge = large.filter(l => !small.some(s => s.itemId === l.itemId))
+    for (const item of [onlyLarge.find(i => i.reason === 'random')!, onlyLarge.find(i => i.reason !== 'random')!]) {
+      const r = await f.api.post('/api/labels', labelBody(item.itemId))
+      expect(r.status).toBe(201)
+      expect(r.json().label.sampled_by).toBe(item.reason === 'random' ? 'random' : 'targeted')
+    }
+  })
+
   it('is the same on every reload, and respects limit', async () => {
     const f = await seeded()
     const a = await queue(f, '?limit=10')

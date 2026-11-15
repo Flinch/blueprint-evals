@@ -127,6 +127,8 @@ export interface QueueItem {
   suiteId: string
   runId: string
   scenarioId: string
+  /** When the run started (ISO time). Lets a person tell several runs of one scenario apart. Says nothing about the judge. */
+  startedAt: string
   criterion: {
     id: string
     /** From the scenario's rubric, as it is now. Null when the rubric cannot be found. */
@@ -233,6 +235,7 @@ function candidatesOf(suite: SuiteRecord, rubricFor: RubricLookup | undefined): 
       suiteId: suite.suiteId,
       runId: run.trace.runId,
       scenarioId: run.trace.scenario.id,
+      startedAt: run.trace.startedAt,
       input: inputText(found.before),
       output: found.output.content,
       context: found.before.map(toQueueTurn),

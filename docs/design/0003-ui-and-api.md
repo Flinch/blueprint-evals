@@ -506,6 +506,39 @@ as it stands when the label is posted. A client cannot claim an item was random
 Calibration then uses the labels as 0002 describes: accuracy metrics from `random`
 labels only by default.
 
+### Jumping to an item
+
+The review queue screen has a "Jump to an item" picker, so a person can open a
+specific conversation instead of only going through the items with Skip. It is a
+grouped native `<select>` (one group per scenario, with a text filter once there
+are more than 12 items). The page loads the queue with `limit=200`, the most the
+server returns, and the picker lists exactly those items and nothing else. When
+more items are up for review than were returned (`stats.pending` is more than the
+list), the page says so, and the rest load when the batch is done. Each entry
+shows the criterion id (with "Critical" when it is), a short run id (the first
+eight characters) and the run's start time, so several runs of one scenario can be
+told apart. `QueueItem.startedAt` carries that time. It is the run's own start, so
+it says nothing about the judge.
+
+`#/classify?item=<itemId>` opens the queue with that item current. When the item is
+not in the loaded list (already labelled, or not up for review) the page shows a
+short banner saying so and opens the normal first item. Choosing an item moves it
+to the front of the local list and keeps the others in their order. If the person
+has chosen a verdict or typed a critique for the current item, the page asks before
+it discards them. "Item N of M" shows where the current item sits in the picker's
+order among the loaded items.
+
+**Why this does not break blindness or the quota.** The picker's order is the
+scenario id, then the criterion id, then the run time, with the run id and item id
+only to break ties. It never uses `reason`, the judge's outcome or the queue's
+position, so it hints at nothing. No entry text, banner or link contains a reason
+or any judge field, and a test asserts that every assignment of reasons gives the
+same picker. The server's rules do not change: a label for an item that is not in
+the queue is still refused (422 `item_not_in_queue`), the picker cannot offer one,
+and a deep link to one just falls back to the first item. `sampled_by` is decided
+from the whole plan (`findQueueItem` runs the plan with no page limit), so how many
+items the page loaded, and which one the person chose first, does not change it.
+
 ## What the front end needs to do
 
 These follow from the above. They are the parts that are easy to get wrong.
@@ -552,7 +585,7 @@ runtime dependencies are unchanged.
 | `#/` | Overview: goal-achieved rate first, pass rate, runs, cost (null shown as unknown), trend, failures by tag, failing criteria and checks |
 | `#/runs`, `#/runs/<runId>` | Suites, filtered run list, and run detail with transcript, tool calls, checks (skipped shown apart from pass), criteria with critiques (N/A criteria listed apart, muted and marked "Not graded"), goal, score (n/a when no criterion applied), cost, trace |
 | `#/launch` | Choose scenarios and a cap, preview, confirm, then live progress from the event stream and cancel |
-| `#/classify`, `#/classify/labels` | Blind review queue, and the label list |
+| `#/classify`, `#/classify?item=<itemId>`, `#/classify/labels` | Blind review queue (with a picker, and a deep link to one item), and the label list |
 | `#/calibration` | Choose rubric, split and selection, preview, confirm, then the report with the true negative rate first |
 | `#/scenarios` | Read-only scenarios, rubrics and validation problems |
 
