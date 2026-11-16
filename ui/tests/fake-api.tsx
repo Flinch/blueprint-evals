@@ -137,6 +137,7 @@ export function baseRoutes(over: Routes = {}): Routes {
     'GET /api/run/status': { body: { activeJob: null } satisfies RunStatusResponse },
     'GET /api/queue': { body: queue() },
     'GET /api/labels': { body: { file: '/work/demo/.evals/labels.jsonl', labels: [], history: {}, stats: labelStatsFixture() } },
+    'GET /api/labels/suggestions': { body: { suggestions: [], fromOtherLabelers: false } },
     'GET /api/calibration': { body: { latest: calibrationRecord() } },
     ...over,
   }

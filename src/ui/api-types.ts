@@ -467,6 +467,18 @@ export interface LabelsResponse {
   stats: LabelStats
 }
 
+/**
+ * GET /api/labels/suggestions?criterion=&verdict=&labeler=&exclude=: up to
+ * four of the labeler's own earlier critiques for that criterion and verdict,
+ * most often written first, as one-click phrases. Taken from the current
+ * labels only, never from the judge.
+ */
+export interface LabelSuggestionsResponse {
+  suggestions: string[]
+  /** True when the named labeler had none, so these are other people's critiques. */
+  fromOtherLabelers: boolean
+}
+
 export type RevealResponse = Reveal
 
 // --------------------------------------------------------------- calibration

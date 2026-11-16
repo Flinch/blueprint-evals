@@ -1,6 +1,6 @@
 import type {
   ApiErrorBody, CalibratePreviewResponse, CalibrateRequest, CalibrateStartRequest, CalibrateStartResponse, CalibrationResponse, ErrorCode,
-  HealthResponse, LabelRequest, LabelResponse, LabelsResponse, OverviewResponse, QueueResponse, RevealResponse, ReviseRequest, RubricsResponse,
+  HealthResponse, LabelRequest, LabelResponse, LabelsResponse, LabelSuggestionsResponse, OverviewResponse, QueueResponse, RevealResponse, ReviseRequest, RubricsResponse,
   RubricUpdateRequest, RubricUpdateResponse, RunCancelResponse, RunPreviewResponse, RunRequest, RunResponse, RunsResponse, RunStartRequest, RunStartResponse, RunStatusResponse,
   ScenariosResponse, SuiteResponse, SuitesResponse,
 } from '../../../src/ui/api-types'
@@ -97,9 +97,11 @@ export const api = {
   runStart: (body: RunStartRequest) => post<RunStartResponse>('/api/run/start', body),
   runStatus: () => get<RunStatusResponse>('/api/run/status'),
   runCancel: () => post<RunCancelResponse>('/api/run/cancel'),
-  queue: (limit = 25) => get<QueueResponse>(`/api/queue${qs({ limit })}`),
+  queue: (limit = 25, criterion?: string | null) => get<QueueResponse>(`/api/queue${qs({ limit, criterion })}`),
   postLabel: (body: LabelRequest) => post<LabelResponse>('/api/labels', body),
   labels: () => get<LabelsResponse>('/api/labels'),
+  suggestions: (q: { criterion: string; verdict: 'pass' | 'fail'; labeler?: string; exclude?: string }) =>
+    get<LabelSuggestionsResponse>(`/api/labels/suggestions${qs({ ...q })}`),
   reveal: (itemId: string) => get<RevealResponse>(`/api/labels/${encodeURIComponent(itemId)}/reveal`),
   revise: (itemId: string, body: ReviseRequest) => post<LabelResponse>(`/api/labels/${encodeURIComponent(itemId)}/revise`, body),
   calibratePreview: (body: CalibrateRequest) => post<CalibratePreviewResponse>('/api/calibrate/preview', body),

@@ -18,13 +18,13 @@ import { providerErrors, crossCheck, modelNeeds, needsModel } from '../engine/pl
 import { executeRun, planRun, PlanProblemsError, type RunPlan } from '../engine/run.js'
 import { defaultProvider } from '../cli/common.js'
 import {
-  appendLabel, buildQueue, CorruptRecordError, createSuiteWriter, DuplicateLabelError, findQueueItem, findRun, InvalidIdError, labelStats,
+  appendLabel, buildQueue, CorruptRecordError, createSuiteWriter, critiqueSuggestions, DuplicateLabelError, findQueueItem, findRun, InvalidIdError, labelStats,
   LabelValidationError, latestCalibration, listLabels, listSuites, readSuite, readSuites, revealItem, saveCalibration, storePaths,
   type QueueOptions, type RubricLookup, type SuiteWriter,
 } from '../store/index.js'
 import type {
   ActiveJob, ApiErrorBody, CalibratePreviewResponse, CalibrateStartResponse, CalibrationResponse, ErrorCode, HealthResponse, LabelResponse,
-  LabelImpact, LabelsResponse, OverviewResponse, QueueResponse, RevealResponse, RubricItem, RubricsResponse, RubricUpdateResponse, RunCancelResponse,
+  LabelImpact, LabelsResponse, LabelSuggestionsResponse, OverviewResponse, QueueResponse, RevealResponse, RubricItem, RubricsResponse, RubricUpdateResponse, RunCancelResponse,
   RunPreviewResponse, RunResponse, RunsResponse, RunStartResponse, RunStatusResponse, ScenariosResponse, SuiteResponse, SuitesResponse,
 } from '../ui/api-types.js'
 import {
@@ -97,6 +97,7 @@ export const API_ROUTES = [
   'GET /api/queue',
   'POST /api/labels',
   'GET /api/labels',
+  'GET /api/labels/suggestions',
   'GET /api/labels/:id/reveal',
   'POST /api/labels/:id/revise',
   'POST /api/calibrate/preview',
@@ -161,6 +162,14 @@ function intParam(url: URLSearchParams, name: string, fallback: number, min: num
   const n = Number(raw)
   if (!Number.isInteger(n) || n < min || n > max) throw new ApiError(400, 'bad_request', `"${name}" must be an integer from ${min} to ${max}.`)
   return n
+}
+
+/** An optional text parameter. Absent or empty is undefined. */
+function textParam(url: URLSearchParams, name: string, max: number): string | undefined {
+  const raw = url.get(name)
+  if (raw === null || raw === '') return undefined
+  if (raw.length > max) throw new ApiError(400, 'bad_request', `"${name}" is longer than ${max} characters.`)
+  return raw
 }
 
 // ------------------------------------------------------------------ routing
@@ -390,13 +399,13 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServer>
 
   // ---- queue inputs
 
-  function queueOptions(limit?: number): QueueOptions {
+  function queueOptions(limit?: number, criterion?: string): QueueOptions {
     const { suites } = readSuites(paths.runs, 200)
     const cat = catalog()
     const rubrics = new Map<string, { criteria: { id: string; text: string; critical: boolean }[] }>()
     for (const l of cat?.scenarios ?? []) if (l.rubric) rubrics.set(l.scenario.id, { criteria: l.rubric.criteria.map(c => ({ id: c.id, text: c.text, critical: c.critical })) })
     const rubricFor: RubricLookup = id => rubrics.get(id)
-    return { suites, labels: readLabels(), rubricFor, limit, seed: options.queueSeed }
+    return { suites, labels: readLabels(), rubricFor, limit, seed: options.queueSeed, ...(criterion !== undefined ? { criterion } : {}) }
   }
 
   /** Every line of the label file, revisions included. */
@@ -659,11 +668,13 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServer>
 
     'GET /api/queue': ({ query }) => {
       const limit = intParam(query, 'limit', 25, 1, 200)
-      const queue = buildQueue(queueOptions(limit))
+      const criterion = textParam(query, 'criterion', 200)
+      const queue = buildQueue(queueOptions(limit, criterion))
       const notes: string[] = []
       if (queue.stats.candidates === 0) {
         notes.push(listSuites(paths.runs).suites.length === 0 ? 'There are no saved runs yet. Run some scenarios first.' : 'Nothing is left to label: every item from the saved runs has a label.')
-      } else if (queue.items.length === 0) notes.push('Nothing is up for review right now.')
+      } else if (queue.stats.pending === 0) notes.push('Nothing is up for review right now.')
+      else if (queue.items.length === 0) notes.push(`No items for "${criterion}" are up for review.`)
       if (!queue.stats.quotaMet) notes.push('Fewer than the required share of the labels so far are random samples, so the queue favours random items until it catches up.')
       const body: QueueResponse = { ...queue, notes }
       return { body }
@@ -703,6 +714,21 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServer>
     'GET /api/labels': () => {
       const { all, current, history } = readResolved()
       const body: LabelsResponse = { file: labelsFile, labels: current, history: Object.fromEntries(history), stats: labelStats(all) }
+      return { body }
+    },
+
+    // People's own earlier critiques, as one-click phrases. Built from the label file only, so nothing from the judge.
+    'GET /api/labels/suggestions': ({ query }) => {
+      const criterion = textParam(query, 'criterion', 200)
+      if (criterion === undefined) throw new ApiError(400, 'bad_request', '"criterion" is required.')
+      const verdict = query.get('verdict')
+      if (verdict !== 'pass' && verdict !== 'fail') throw new ApiError(400, 'bad_request', '"verdict" must be pass or fail.')
+      const labeler = textParam(query, 'labeler', 100)
+      const exclude = textParam(query, 'exclude', 300)
+      const { all } = readResolved()
+      const body: LabelSuggestionsResponse = critiqueSuggestions(all, {
+        criterion, verdict, ...(labeler !== undefined ? { labeler } : {}), ...(exclude !== undefined ? { exclude } : {}),
+      })
       return { body }
     },
 

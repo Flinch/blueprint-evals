@@ -26,6 +26,8 @@ import type { SuiteRecord } from './suites.js'
 //     something that never happened. Such criteria are counted in the stats.
 //  3. A random quota. At least MIN_RANDOM_SHARE of all labels are randomly
 //     sampled, because only random labels can estimate the judge's accuracy.
+//     Filtering the queue to one criterion happens after the plan, so it never
+//     changes what is sampled.
 //
 // The label file may hold revisions (a person changed a label after seeing the
 // judge). Everything here counts items, using the current label of each, so a
@@ -185,6 +187,12 @@ export interface QueueOptions {
   limit?: number
   seed?: string
   minRandomShare?: number
+  /**
+   * Only this criterion's items. Applied after the plan and before the page
+   * limit, so what is up for review, each item's `reason` and the random quota
+   * are the same as without it, and the items keep their blind display order.
+   */
+  criterion?: string
 }
 
 export interface QueueStats {
@@ -201,6 +209,8 @@ export interface QueueStats {
   minRandomShare: number
   /** Whether the labels so far meet the random quota. */
   quotaMet: boolean
+  /** Items up for review per criterion, from the whole plan (never the page or a criterion filter), sorted by id. Criteria with none are left out. */
+  byCriterion: { id: string; pending: number }[]
 }
 
 export interface ReviewQueue {
@@ -367,16 +377,24 @@ function plan(options: QueueOptions): Plan {
   return { all: selected, candidateIds: seen, candidates: candidates.length, notApplicable: skippedNa.size, labelled, labelledRandom, random: randomCount }
 }
 
-/** The review queue: up to `limit` items, never carrying the judge's verdict or critique. */
+/**
+ * The review queue: up to `limit` items, never carrying the judge's verdict or
+ * critique. With `criterion`, only that criterion's items, filtered from the
+ * finished plan. The filter changes which items are on the page and nothing
+ * else: what is up for review, each item's reason and the stats stay the same.
+ */
 export function buildQueue(options: QueueOptions): ReviewQueue {
   const p = plan(options)
   const limit = Math.max(1, Math.floor(options.limit ?? 25))
   const share = options.minRandomShare ?? MIN_RANDOM_SHARE
   const seed = options.seed ?? DEFAULT_QUEUE_SEED
+  const filtered = options.criterion === undefined ? p.all : p.all.filter(i => i.criterion.id === options.criterion)
 
-  let page = p.all.slice(0, limit)
-  // Each page carries its own share of random items too, not only the queue as a whole.
-  const wanted = Math.min(Math.ceil(share * page.length), p.random)
+  let page = filtered.slice(0, limit)
+  // Each mixed page carries its own share of random items too, not only the queue as a whole. A one-criterion page
+  // is not topped up: the plan already holds the quota across the whole queue, and swapping would mean taking items
+  // out of that criterion's blind order.
+  const wanted = options.criterion === undefined ? Math.min(Math.ceil(share * page.length), p.random) : 0
   let have = page.filter(i => i.reason === 'random').length
   if (have < wanted) {
     const spare = p.all.slice(limit).filter(i => i.reason === 'random')
@@ -403,8 +421,77 @@ export function buildQueue(options: QueueOptions): ReviewQueue {
       labelledRandomShare: p.labelled === 0 ? null : p.labelledRandom / p.labelled,
       minRandomShare: share,
       quotaMet: p.labelled === 0 || p.labelledRandom / p.labelled >= share,
+      byCriterion: pendingByCriterion(p.all),
     },
   }
+}
+
+function pendingByCriterion(items: QueueItem[]): QueueStats['byCriterion'] {
+  const counts = new Map<string, number>()
+  for (const i of items) counts.set(i.criterion.id, (counts.get(i.criterion.id) ?? 0) + 1)
+  return [...counts].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)).map(([id, pending]) => ({ id, pending }))
+}
+
+// ------------------------------------------------------ critique suggestions
+
+/** At most this many suggestions are returned. */
+export const MAX_SUGGESTIONS = 4
+/** A critique longer than this is too specific to one item to offer again. */
+export const MAX_SUGGESTION_LENGTH = 300
+
+export interface SuggestionQuery {
+  criterion: string
+  verdict: Label['verdict']
+  /** Prefer this person's critiques. Without it, or when they have none, everyone's are used. */
+  labeler?: string
+  /** An item whose current label is left out (the one being changed, so its own critique is not offered back). */
+  exclude?: string
+}
+
+export interface Suggestions {
+  suggestions: string[]
+  /** True when the labeler was named but had no matching critiques, so these come from other people. */
+  fromOtherLabelers: boolean
+}
+
+const normaliseCritique = (s: string) => s.replace(/\s+/g, ' ').trim().toLowerCase()
+
+/**
+ * Phrases a person has written before for this criterion and verdict, to offer
+ * as one-click critiques. Taken from the current labels only (a revised item
+ * counts with its latest critique), never from the judge. Critiques are grouped
+ * by their normalised text (trimmed, whitespace collapsed, case ignored),
+ * ranked by how often they were written, then by the most recent use, and each
+ * is returned as last written. Critiques over MAX_SUGGESTION_LENGTH characters
+ * are left out. Throws LabelChainError for a broken replace chain.
+ */
+export function critiqueSuggestions(all: Label[], query: SuggestionQuery): Suggestions {
+  const pool = resolveLabels(all).current.filter(
+    l => l.criterion === query.criterion && l.verdict === query.verdict && itemIdOfLabel(l) !== query.exclude && l.critique.trim().length <= MAX_SUGGESTION_LENGTH,
+  )
+  const labeler = query.labeler?.trim()
+  const own = labeler ? pool.filter(l => l.labeler.trim() === labeler) : pool
+  const fromOtherLabelers = labeler !== undefined && labeler !== '' && own.length === 0 && pool.length > 0
+  const source = own.length > 0 ? own : pool
+
+  const groups = new Map<string, { text: string; count: number; latest: number }>()
+  for (const l of source) {
+    const text = l.critique.trim()
+    if (text === '') continue
+    const key = normaliseCritique(text)
+    const at = Date.parse(l.at)
+    const g = groups.get(key)
+    if (!g) groups.set(key, { text, count: 1, latest: at })
+    else {
+      g.count++
+      if (at >= g.latest) {
+        g.latest = at
+        g.text = text
+      }
+    }
+  }
+  const ranked = [...groups.entries()].sort(([ka, a], [kb, b]) => b.count - a.count || b.latest - a.latest || (ka < kb ? -1 : ka > kb ? 1 : 0))
+  return { suggestions: ranked.slice(0, MAX_SUGGESTIONS).map(([, g]) => g.text), fromOtherLabelers }
 }
 
 export type FoundItem =

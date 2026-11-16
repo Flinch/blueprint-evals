@@ -124,7 +124,7 @@ const C = queueItem({ itemId: 'run-c:crit-2', runId: 'run-c', group: 'run-c', sc
 
 function routes(over = {}) {
   return baseRoutes({
-    'GET /api/queue': { body: queue({ items: [A, B, C], stats: { candidates: 10, notApplicable: 0, pending: 3, queued: 3, labelled: 5, labelledRandom: 1, labelledRandomShare: 0.2, minRandomShare: 0.3, quotaMet: false } }) },
+    'GET /api/queue': { body: queue({ items: [A, B, C], stats: { candidates: 10, notApplicable: 0, pending: 3, queued: 3, labelled: 5, labelledRandom: 1, labelledRandomShare: 0.2, minRandomShare: 0.3, quotaMet: false, byCriterion: [] } }) },
     ...over,
   })
 }
@@ -227,7 +227,7 @@ describe('Jump to an item', () => {
   it('shows a filter for a long list, narrows the options, and keeps the current item selectable', async () => {
     const user = userEvent.setup()
     const many = Array.from({ length: 30 }, (_, i) => make(`run-${String(i).padStart(2, '0')}`, i < 15 ? 'billing' : 'support', 'crit', '2026-11-12T10:00:00.000Z', 'random'))
-    installFetch(routes({ 'GET /api/queue': { body: queue({ items: many, stats: { candidates: 30, notApplicable: 0, pending: 30, queued: 30, labelled: 0, labelledRandom: 0, labelledRandomShare: null, minRandomShare: 0.3, quotaMet: true } }) } }))
+    installFetch(routes({ 'GET /api/queue': { body: queue({ items: many, stats: { candidates: 30, notApplicable: 0, pending: 30, queued: 30, labelled: 0, labelledRandom: 0, labelledRandomShare: null, minRandomShare: 0.3, quotaMet: true, byCriterion: [] } }) } }))
     renderApp('/classify')
     await screen.findByLabelText('Item to label')
     await user.type(screen.getByLabelText('Filter the list'), 'support')
@@ -246,7 +246,7 @@ describe('Jump to an item', () => {
   })
 
   it('says plainly when the list is capped', async () => {
-    installFetch(routes({ 'GET /api/queue': { body: queue({ items: [A, B, C], stats: { candidates: 400, notApplicable: 0, pending: 250, queued: 3, labelled: 5, labelledRandom: 1, labelledRandomShare: 0.2, minRandomShare: 0.3, quotaMet: false } }) } }))
+    installFetch(routes({ 'GET /api/queue': { body: queue({ items: [A, B, C], stats: { candidates: 400, notApplicable: 0, pending: 250, queued: 3, labelled: 5, labelledRandom: 1, labelledRandomShare: 0.2, minRandomShare: 0.3, quotaMet: false, byCriterion: [] } }) } }))
     renderApp('/classify')
     await screen.findByLabelText('Item to label')
     expect(screen.getByText(/The list shows 3 of the 250 items up for review/)).toBeInTheDocument()
@@ -284,7 +284,7 @@ describe('deep link #/classify?item=', () => {
   })
 
   it('says the list may be capped when the queue has more than it loaded', async () => {
-    installFetch(routes({ 'GET /api/queue': { body: queue({ items: [A, B, C], stats: { candidates: 400, notApplicable: 0, pending: 250, queued: 3, labelled: 5, labelledRandom: 1, labelledRandomShare: 0.2, minRandomShare: 0.3, quotaMet: false } }) } }))
+    installFetch(routes({ 'GET /api/queue': { body: queue({ items: [A, B, C], stats: { candidates: 400, notApplicable: 0, pending: 250, queued: 3, labelled: 5, labelledRandom: 1, labelledRandomShare: 0.2, minRandomShare: 0.3, quotaMet: false, byCriterion: [] } }) } }))
     renderApp('/classify?item=run-zzz%3Acrit-9')
     expect(await screen.findByText(/may be further down/)).toBeInTheDocument()
   })

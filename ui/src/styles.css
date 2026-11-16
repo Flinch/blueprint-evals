@@ -425,6 +425,18 @@ a.run-row:hover, .run-row:hover { background: var(--card2); }
 .compare { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
 @media (max-width: 700px) { .compare { grid-template-columns: 1fr; } }
 .agree-banner { font-family: var(--font-display); font-weight: 700; font-size: 1.05rem; }
+.mode-toggle { display: inline-flex; }
+.mode-toggle .btn + .btn { margin-left: -1px; }
+.mode-toggle .btn[aria-pressed="true"] { background: var(--accent-tint); color: var(--accent-text); border-color: var(--accent-border); }
+/* One-criterion mode: the criterion stays in view under the top bar while the items scroll. */
+.criterion-pin { position: sticky; top: 56px; z-index: 5; border-left: 3px solid var(--accent); }
+.quick-critiques { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; margin-top: 0.6rem; }
+.critique-chip {
+  display: inline-flex; align-items: center; gap: 0.4rem; max-width: 100%; padding: 0.25rem 0.6rem; font-family: var(--font-body); font-size: 0.8rem;
+  background: transparent; border: 1px solid var(--border2); color: var(--light); cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.critique-chip:hover:not(:disabled) { border-color: var(--accent-border); background: var(--accent-tint); }
+.critique-chip:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* PROGRESS */
 .progress-run { border: 1px solid var(--border); background: var(--card); }

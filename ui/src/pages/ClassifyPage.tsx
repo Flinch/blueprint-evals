@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { Label, LabelStats, QueueItem, QueueStats, RevealResponse } from '../../../src/ui/api-types'
+import type { Label, LabelStats, LabelSuggestionsResponse, QueueItem, QueueStats, RevealResponse } from '../../../src/ui/api-types'
 import { api, describeError, isApiFailure } from '../api/client'
 import { useAsync } from '../api/useAsync'
 import { TurnView } from './RunDetailPage'
@@ -17,8 +17,15 @@ import { readStored, writeStored } from '../lib/storage'
 // A saved label can be changed later. The change is saved as a new line that
 // replaces the current one, and the first, blind label stays in the file. Every
 // change is treated as made after seeing the judge.
+//
+// Two things make labelling faster without touching what is up for review:
+// "One criterion at a time" asks the server for one criterion's items (filtered
+// after its sampling plan, so the quota, `sampled_by` and the blind order are
+// unchanged), and quick critiques offer the person's own earlier critiques for
+// the criterion and verdict, which never include anything from the judge.
 
 export const LABELER_KEY = 'evals-ui-labeler'
+export const MODE_KEY = 'evals-ui-classify-mode'
 export const MAX_CRITIQUE = 20_000
 export const MAX_LABELER = 100
 // The server's largest page. The picker lists the whole queue, so ask for all it will give.
@@ -216,6 +223,164 @@ function ItemPicker({
   )
 }
 
+// ------------------------------------------------------ one criterion at a time
+
+export type QueueMode = 'mixed' | 'criterion'
+
+/** The mode remembered in this browser. Anything else, or storage that throws, is mixed. */
+export function storedMode(): QueueMode {
+  return readStored(MODE_KEY) === 'criterion' ? 'criterion' : 'mixed'
+}
+
+/** The criterion of an item id (`<runId>:<criterionId>`), or null when the id has no colon. */
+export function criterionOfItem(itemId: string | undefined | null): string | null {
+  if (!itemId) return null
+  const i = itemId.indexOf(':')
+  return i <= 0 || i === itemId.length - 1 ? null : itemId.slice(i + 1)
+}
+
+export interface CriterionOption {
+  id: string
+  pending: number
+  label: string
+}
+
+/** The criterion select: every criterion with items left, by id, plus the chosen one (at 0) when it has none, so the select keeps its value. */
+export function criterionOptions(byCriterion: QueueStats['byCriterion'], chosen: string | null): CriterionOption[] {
+  const list = byCriterion.filter(c => c.pending > 0).map(c => ({ ...c }))
+  if (chosen !== null && !list.some(c => c.id === chosen)) list.push({ id: chosen, pending: 0 })
+  return list.sort((a, b) => cmp(a.id, b.id)).map(c => ({ ...c, label: `${c.id} (${c.pending} left)` }))
+}
+
+/** The criterion to offer when one runs out: the next by id that has items left, wrapping round, or null when none has. */
+export function nextCriterion(byCriterion: QueueStats['byCriterion'], current: string | null): { id: string; pending: number } | null {
+  const left = byCriterion.filter(c => c.pending > 0 && c.id !== current).sort((a, b) => cmp(a.id, b.id))
+  if (current === null) return left[0] ?? null
+  return left.find(c => c.id > current) ?? left[0] ?? null
+}
+
+function ModeBar({
+  mode, chosen, byCriterion, disabled, onMode, onCriterion,
+}: {
+  mode: QueueMode
+  chosen: string | null
+  byCriterion: QueueStats['byCriterion']
+  disabled: boolean
+  onMode(m: QueueMode): void
+  onCriterion(id: string): void
+}) {
+  const options = criterionOptions(byCriterion, chosen)
+  return (
+    <div className="card-sm">
+      <div className="filters" style={{ marginBottom: 0 }}>
+        <div className="form-group">
+          <div className="form-label" id="mode-label">Labelling mode</div>
+          <div className="mode-toggle" role="group" aria-labelledby="mode-label">
+            <button type="button" className="btn btn-ghost btn-sm" aria-pressed={mode === 'mixed'} disabled={disabled} onClick={() => onMode('mixed')}>Mixed</button>
+            <button type="button" className="btn btn-ghost btn-sm" aria-pressed={mode === 'criterion'} disabled={disabled} onClick={() => onMode('criterion')}>One criterion at a time</button>
+          </div>
+        </div>
+        {mode === 'criterion' && options.length > 0 ? (
+          <div className="form-group wide">
+            <label className="form-label" htmlFor="criterion-picker">Criterion</label>
+            <select id="criterion-picker" className="form-select" value={chosen ?? ''} disabled={disabled} onChange={e => onCriterion(e.target.value)}>
+              {chosen === null ? <option value="" disabled>Choose a criterion</option> : null}
+              {options.map(o => <option key={o.id} value={o.id}>{o.label}</option>)}
+            </select>
+          </div>
+        ) : null}
+      </div>
+      <p className="form-hint">
+        {mode === 'mixed'
+          ? 'Items from every criterion, in the queue’s own order.'
+          : 'Only this criterion’s items, in the queue’s own order. What is up for review and the random quota stay the same.'}
+      </p>
+    </div>
+  )
+}
+
+/** The criterion being labelled, pinned to the top of the page in one-criterion mode, so it is not repeated for every item. */
+function PinnedCriterion({ id, item, rubricId }: { id: string; item: QueueItem | null; rubricId?: string | null }) {
+  const c = item && item.criterion.id === id ? item.criterion : null
+  return (
+    <section className="card-sm criterion-pin" aria-label="Criterion to judge">
+      <div className="review-label">Criterion to judge</div>
+      {c ? <div className="criterion-text">{c.text ?? `(The rubric text is not available. Criterion id: ${c.id})`}</div> : null}
+      <div className="row small muted" style={{ marginTop: c ? '0.4rem' : 0 }}>
+        <span className="mono">{id}</span>
+        {c?.critical ? <CriticalMarker /> : null}
+        <CriterionLink criterion={id} rubricId={rubricId} />
+      </div>
+    </section>
+  )
+}
+
+// ------------------------------------------------------------ quick critiques
+
+/** How many characters of a suggestion fit on its button. The full text is in the title. */
+export const CHIP_LENGTH = 60
+
+export function chipText(s: string): string {
+  return s.length <= CHIP_LENGTH ? s : `${s.slice(0, CHIP_LENGTH - 1).trimEnd()}…`
+}
+
+/** A chip fills an empty critique box. With text already there, the phrase goes on a new line after it, so nothing is lost. */
+export function insertSuggestion(current: string, phrase: string): string {
+  return current.trim() === '' ? phrase : `${current.replace(/\s+$/, '')}\n${phrase}`
+}
+
+/** The person's earlier critiques for a criterion and verdict, fetched once a verdict is chosen. Null while loading, with no verdict, or on any error. */
+export function useSuggestions(q: { criterion: string | null; verdict: 'pass' | 'fail' | null; labeler: string; exclude?: string }): LabelSuggestionsResponse | null {
+  const [data, setData] = useState<LabelSuggestionsResponse | null>(null)
+  const labeler = q.labeler.trim()
+  useEffect(() => {
+    setData(null)
+    if (q.criterion === null || q.verdict === null) return
+    let live = true
+    api
+      .suggestions({ criterion: q.criterion, verdict: q.verdict, ...(labeler ? { labeler } : {}), ...(q.exclude ? { exclude: q.exclude } : {}) })
+      .then(r => live && setData(r))
+      .catch(() => {}) // No chips. Labelling works the same without them.
+    return () => {
+      live = false
+    }
+  }, [q.criterion, q.verdict, labeler, q.exclude])
+  return data
+}
+
+/**
+ * Up to four one-click critiques under the critique box. Keys 1 to 4 insert one
+ * while focus is outside a text field, so typing a digit in the box still types it.
+ */
+export function QuickCritiques({ data, disabled = false, onPick }: { data: LabelSuggestionsResponse | null; disabled?: boolean; onPick(text: string): void }) {
+  const list = data?.suggestions ?? []
+  useEffect(() => {
+    if (list.length === 0 || disabled) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.altKey || e.ctrlKey || e.metaKey || e.isComposing || isTypingTarget(e.target)) return
+      if (!/^[1-4]$/.test(e.key)) return
+      const text = list[Number(e.key) - 1]
+      if (text === undefined) return
+      e.preventDefault()
+      onPick(text)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [list, disabled, onPick])
+  if (list.length === 0) return null
+  return (
+    <div className="quick-critiques" role="group" aria-label="Quick critiques">
+      <span className="small muted">{data?.fromOtherLabelers ? 'Earlier critiques from other labelers:' : 'Your earlier critiques:'}</span>
+      {list.map((s, i) => (
+        <button key={i} type="button" className="critique-chip" title={s} aria-label={s} disabled={disabled} onClick={() => onPick(s)}>
+          <span className="kbd" aria-hidden="true">{i + 1}</span>
+          {chipText(s)}
+        </button>
+      ))}
+    </div>
+  )
+}
+
 // ---------------------------------------------------------------- reveal view
 
 const verdictWord = (v: 'pass' | 'fail') => (v === 'pass' ? 'Pass' : 'Fail')
@@ -308,20 +473,36 @@ export function RevealView({ reveal, criterion }: { reveal: RevealResponse; crit
  * new line that replaces it, and the first, blind label stays in the file.
  */
 export function ReviseForm({
-  itemId, current, idPrefix, onSaved, onCancel,
+  itemId, criterion, current, idPrefix, onSaved, onCancel, onSuggestions,
 }: {
   itemId: string
+  /** For the quick critiques. */
+  criterion: string
   current: Pick<Label, 'verdict' | 'critique' | 'labeler'>
   /** Keeps element ids unique when more than one form can be on the page. */
   idPrefix: string
   onSaved(label: Label): void
   onCancel(): void
+  /** How many quick critiques are on offer, for a shortcut hint outside the form. */
+  onSuggestions?(count: number): void
 }) {
   const [verdict, setVerdict] = useState<'pass' | 'fail' | null>(current.verdict)
   const [critique, setCritique] = useState(current.critique)
   const [labeler, setLabeler] = useState(() => readStored(LABELER_KEY) ?? current.labeler)
   const [saving, setSaving] = useState(false)
   const [problem, setProblem] = useState<string | null>(null)
+  const critiqueRef = useRef<HTMLTextAreaElement>(null)
+  // The item's own current critique is left out: it is already in the box.
+  const suggestions = useSuggestions({ criterion, verdict, labeler, exclude: itemId })
+  const chipCount = suggestions?.suggestions.length ?? 0
+  useEffect(() => {
+    onSuggestions?.(chipCount)
+  }, [chipCount, onSuggestions])
+  useEffect(() => () => onSuggestions?.(0), [onSuggestions])
+  const pick = useCallback((text: string) => {
+    setCritique(c => insertSuggestion(c, text))
+    critiqueRef.current?.focus()
+  }, [])
   const errors = validateLabel({ verdict, critique, labeler })
   const unchanged = verdict === current.verdict && critique.trim() === current.critique.trim()
   const valid = Object.keys(errors).length === 0 && !unchanged
@@ -374,6 +555,7 @@ export function ReviseForm({
         <label className="form-label" htmlFor={ids.critique}>Critique (required)</label>
         <textarea
           id={ids.critique}
+          ref={critiqueRef}
           className="form-textarea"
           autoFocus
           value={critique}
@@ -383,6 +565,7 @@ export function ReviseForm({
           onChange={e => setCritique(e.target.value)}
         />
         {errors.critique ? <div className="form-error" role="alert">{errors.critique}</div> : <div className="form-hint">Say what changed your mind, so the reason is on file too.</div>}
+        <QuickCritiques data={suggestions} disabled={saving} onPick={pick} />
       </div>
       <div className="form-group" style={{ maxWidth: 320 }}>
         <label className="form-label" htmlFor={ids.labeler}>Your name</label>
@@ -404,13 +587,29 @@ export function ReviseForm({
 
 // --------------------------------------------------------------- queue screen
 
-export function QueueView({ itemId }: { itemId?: string } = {}) {
-  const queue = useAsync(() => api.queue(QUEUE_LIMIT), [])
+export function QueueView({
+  itemId, criterion: linkCriterion, onCriterionLink,
+}: {
+  itemId?: string
+  /** From `#/classify?criterion=<id>`: opens one-criterion mode on it. */
+  criterion?: string
+  /** Puts the chosen criterion (or none, for mixed) in the address, so a reload keeps it. */
+  onCriterionLink?(criterion: string | null): void
+} = {}) {
+  // An item link wins over a criterion link: the item's own criterion is the one shown, so the item can be current.
+  const [mode, setMode] = useState<QueueMode>(() => (linkCriterion ? 'criterion' : storedMode()))
+  const [chosen, setChosen] = useState<string | null>(() => criterionOfItem(itemId) ?? linkCriterion ?? null)
+  const queryCriterion = mode === 'criterion' ? chosen : null
+  // Which criterion a response was for travels with it, so a list for another criterion is never shown as this one's.
+  const queue = useAsync(async () => ({ ...(await api.queue(QUEUE_LIMIT, queryCriterion)), for: queryCriterion }), [queryCriterion])
+  const fresh = queue.data !== null && queue.data.for === queryCriterion
   const labels = useAsync(() => api.labels(), [])
   // Only to link a criterion to its rubric. A failure leaves the link without a rubric id, and the Scenarios page finds it.
   const rubrics = useAsync(() => api.rubrics(), [])
   const rubricOf = (scenarioId: string) => rubrics.data?.rubrics.find(r => r.usedBy.includes(scenarioId))?.rubric.id
   const [items, setItems] = useState<QueueItem[]>([])
+  // The response the local list was taken from. Until the list is taken from the latest one, the page shows it is loading.
+  const [itemsFrom, setItemsFrom] = useState<object | null>(null)
   const [stats, setStats] = useState<QueueStats | null>(null)
   const [labelStats, setLabelStats] = useState<LabelStats | null>(null)
   const [sessionDone, setSessionDone] = useState(0)
@@ -425,13 +624,21 @@ export function QueueView({ itemId }: { itemId?: string } = {}) {
   const [showContext, setShowContext] = useState(false)
   const [skipped, setSkipped] = useState(0)
   const [linkMissing, setLinkMissing] = useState(false)
+  const [reviseChips, setReviseChips] = useState(0)
   const critiqueRef = useRef<HTMLTextAreaElement>(null)
   // The deep-link id that has been acted on, so a reload of the list does not move that item to the front again.
   const linkHandled = useRef<string | undefined>(undefined)
+  // One-criterion mode with no criterion yet: the first answer (unfiltered) only says which criteria have items.
+  const choosing = mode === 'criterion' && chosen === null
+
+  useEffect(() => {
+    writeStored(MODE_KEY, mode)
+  }, [mode])
 
   // Take a fresh page from the server on load and whenever the local page runs out.
   useEffect(() => {
-    if (queue.data) {
+    if (queue.data) setStats(queue.data.stats)
+    if (queue.data && fresh && !choosing) {
       let list = queue.data.items
       if (itemId && linkHandled.current !== itemId) {
         const r = applyDeepLink(list, itemId)
@@ -440,7 +647,7 @@ export function QueueView({ itemId }: { itemId?: string } = {}) {
         linkHandled.current = itemId
       }
       setItems(list)
-      setStats(queue.data.stats)
+      setItemsFrom(queue.data)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [queue.data])
@@ -448,9 +655,17 @@ export function QueueView({ itemId }: { itemId?: string } = {}) {
     if (labels.data) setLabelStats(labels.data.stats)
   }, [labels.data])
 
+  // One-criterion mode opened with no criterion named: start with the first, by id, that has items.
+  useEffect(() => {
+    if (!choosing || !queue.data) return
+    const first = nextCriterion(queue.data.stats.byCriterion, null)
+    if (first) setChosen(first.id)
+  }, [choosing, queue.data])
+
   const current = items[0] ?? null
   const errors = validateLabel({ verdict, critique, labeler })
   const valid = Object.keys(errors).length === 0
+  const suggestions = useSuggestions({ criterion: current?.criterion.id ?? null, verdict, labeler })
 
   const resetForm = () => {
     setVerdict(null)
@@ -463,16 +678,42 @@ export function QueueView({ itemId }: { itemId?: string } = {}) {
     setShowContext(false)
   }
 
+  /** Whether the current item can be left: never mid-save, and a typed draft only after asking. */
+  const mayLeave = () => {
+    if (phase === 'saving') return false
+    return !(phase === 'edit' && hasDraft({ verdict, critique }) && !window.confirm('Switch to another item? What you chose or typed for this one will be discarded.'))
+  }
+
   // Make a listed item the current one. The others keep their order behind it. A typed draft is not thrown away without asking.
   const jumpTo = (id: string) => {
-    if (!current || id === current.itemId || phase === 'saving') return
-    if (phase === 'edit' && hasDraft({ verdict, critique }) && !window.confirm('Switch to another item? What you chose or typed for this one will be discarded.')) return
+    if (!current || id === current.itemId || !mayLeave()) return
     // After a save the current item has its label already, so it leaves the list as it does on Next.
     const labelled = phase !== 'edit'
     setItems(prev => moveToFront(labelled ? prev.filter(x => x.itemId !== current.itemId) : prev, id))
     setLinkMissing(false)
     resetForm()
   }
+
+  /** Switches mode or criterion. The new list loads from the server; the one on screen is not reused. */
+  const switchTo = (nextMode: QueueMode, nextCriterionId: string | null, fromLink = false) => {
+    if (nextMode === mode && (nextMode === 'mixed' || nextCriterionId === chosen)) return
+    if (!fromLink && current && !mayLeave()) return
+    setMode(nextMode)
+    if (nextMode === 'criterion') setChosen(nextCriterionId)
+    setItems([])
+    setItemsFrom(null)
+    setLinkMissing(false)
+    resetForm()
+    if (!fromLink) onCriterionLink?.(nextMode === 'criterion' ? nextCriterionId : null)
+  }
+  const chooseMode = (m: QueueMode) => switchTo(m, m === 'criterion' ? chosen ?? nextCriterion((stats ?? queue.data?.stats)?.byCriterion ?? [], null)?.id ?? null : null)
+  const chooseCriterion = (id: string) => switchTo('criterion', id)
+
+  // The address named a criterion while the page is open.
+  useEffect(() => {
+    if (linkCriterion && !criterionOfItem(itemId)) switchTo('criterion', linkCriterion, true)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [linkCriterion])
 
   // The address changed while the page is open (a new #/classify?item=... link).
   useEffect(() => {
@@ -482,6 +723,12 @@ export function QueueView({ itemId }: { itemId?: string } = {}) {
       return
     }
     if (!queue.data || linkHandled.current === itemId) return
+    // In one-criterion mode the item's own criterion is loaded first, and the list effect then applies the link.
+    const itemCriterion = criterionOfItem(itemId)
+    if (mode === 'criterion' && itemCriterion && itemCriterion !== chosen) {
+      switchTo('criterion', itemCriterion, true)
+      return
+    }
     linkHandled.current = itemId
     if (applyDeepLink(items, itemId).found) jumpTo(itemId)
     else setLinkMissing(true)
@@ -495,7 +742,7 @@ export function QueueView({ itemId }: { itemId?: string } = {}) {
 
   // When the local page is empty, ask the server for more (labelling removes items, so there may be more behind them).
   useEffect(() => {
-    if (items.length === 0 && queue.data && !queue.loading && sessionDone + skipped > 0) queue.reload()
+    if (items.length === 0 && queue.data && fresh && !queue.loading && sessionDone + skipped > 0) queue.reload()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [items.length])
 
@@ -510,6 +757,11 @@ export function QueueView({ itemId }: { itemId?: string } = {}) {
     api.queue(QUEUE_LIMIT).then(q => setStats(q.stats)).catch(() => {})
     api.labels().then(l => setLabelStats(l.stats)).catch(() => {})
   }
+
+  const pickSuggestion = useCallback((text: string) => {
+    setCritique(c => insertSuggestion(c, text))
+    critiqueRef.current?.focus()
+  }, [])
 
   const submit = useCallback(async () => {
     if (!current || phase !== 'edit') return
@@ -570,6 +822,7 @@ export function QueueView({ itemId }: { itemId?: string } = {}) {
   }
 
   // Keyboard shortcuts. Plain keys are ignored while typing or when a button has focus; Ctrl/Cmd+Enter submits from anywhere.
+  // Keys 1 to 4 belong to the quick critiques, which listen for them themselves.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.altKey || e.isComposing) return
@@ -606,16 +859,23 @@ export function QueueView({ itemId }: { itemId?: string } = {}) {
     return () => window.removeEventListener('keydown', onKey)
   }, [phase, submit, skip, doReveal, next, startRevise])
 
+  const editChips = suggestions?.suggestions.length ?? 0
+  const chipKeys = (n: number) =>
+    n > 0 ? (
+      <>
+        {' '}&middot; <span className="kbd">1</span>{n > 1 ? <> to <span className="kbd">{n}</span></> : null} quick critique
+      </>
+    ) : null
   const hint = useMemo(
     () =>
       phase === 'edit' ? (
         <>
           <span className="kbd">P</span> pass &middot; <span className="kbd">F</span> fail &middot; <span className="kbd">N</span> skip &middot; <span className="kbd">Enter</span> submit
-          &middot; <span className="kbd">Ctrl</span>+<span className="kbd">Enter</span> submits while typing
+          &middot; <span className="kbd">Ctrl</span>+<span className="kbd">Enter</span> submits while typing{chipKeys(editChips)}
         </>
       ) : phase === 'revising' ? (
         <>
-          <span className="kbd">Esc</span> cancel the change &middot; <span className="kbd">Ctrl</span>+<span className="kbd">Enter</span> saves while typing
+          <span className="kbd">Esc</span> cancel the change &middot; <span className="kbd">Ctrl</span>+<span className="kbd">Enter</span> saves while typing{chipKeys(reviseChips)}
         </>
       ) : phase === 'revealed' || (phase === 'revealing' && reveal) ? (
         <>
@@ -626,25 +886,36 @@ export function QueueView({ itemId }: { itemId?: string } = {}) {
           <span className="kbd">R</span> reveal the judge &middot; <span className="kbd">N</span> or <span className="kbd">Enter</span> next item
         </>
       ),
-    [phase, reveal],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [phase, reveal, editChips, reviseChips],
   )
 
   if (queue.loading && !queue.data) return <Loading label="Loading the review queue" />
   if (queue.error && !queue.data) return <ErrorState error={queue.error} onRetry={queue.reload} title="Could not load the queue" />
 
+  const shownStats = stats ?? queue.data?.stats ?? null
+  const byCriterion = shownStats?.byCriterion ?? []
+  const oneCriterion = mode === 'criterion' && chosen !== null
+  // Up for review in what is being shown: one criterion's count in that mode, the whole queue otherwise.
+  const pendingHere = shownStats ? (oneCriterion ? byCriterion.find(c => c.id === chosen)?.pending ?? 0 : shownStats.pending) : null
+  const listReady = fresh && itemsFrom === queue.data
+  const loadingList = choosing ? byCriterion.length > 0 : !listReady || (items.length === 0 && queue.loading)
   const total = sessionDone + items.length
   const showErrors = tried
   const position = current ? pickerPosition(items, current.itemId) : null
   // The server returns at most QUEUE_LIMIT items. More up for review than are loaded means the list is capped.
-  const capped = stats && stats.pending > items.length ? { shown: items.length, pending: stats.pending } : null
+  const capped = pendingHere !== null && pendingHere > items.length ? { shown: items.length, pending: pendingHere } : null
+  const offer = oneCriterion ? nextCriterion(byCriterion, chosen) : null
 
   return (
     <div className="stack">
+      <ModeBar mode={mode} chosen={chosen} byCriterion={byCriterion} disabled={phase === 'saving'} onMode={chooseMode} onCriterion={chooseCriterion} />
+      {oneCriterion ? <PinnedCriterion id={chosen} item={current} rubricId={current ? rubricOf(current.scenarioId) : undefined} /> : null}
       <div className="grid-2">
-        <QuotaStatus stats={stats} />
+        <QuotaStatus stats={shownStats} />
         <LabelledSummary stats={labelStats} />
       </div>
-      {queue.data?.notes.length ? <Banner kind="info"><ul>{queue.data.notes.map((n, i) => <li key={i}>{n}</li>)}</ul></Banner> : null}
+      {fresh && queue.data?.notes.length ? <Banner kind="info"><ul>{queue.data.notes.map((n, i) => <li key={i}>{n}</li>)}</ul></Banner> : null}
 
       {linkMissing ? (
         <Banner kind="info" role="status">
@@ -653,7 +924,23 @@ export function QueueView({ itemId }: { itemId?: string } = {}) {
         </Banner>
       ) : null}
 
-      {!current ? (
+      {loadingList ? (
+        <Loading label="Loading the review queue" />
+      ) : !current && oneCriterion ? (
+        <div className="card" role="status" aria-label="Criterion done">
+          <EmptyState title="Nothing left for this criterion">
+            <p>Nothing for <span className="mono">{chosen}</span> is up for review right now.</p>
+            {offer ? (
+              <div className="row" style={{ justifyContent: 'center', marginTop: '0.8rem' }}>
+                <button type="button" className="btn btn-primary" onClick={() => chooseCriterion(offer.id)}>Next criterion: {offer.id} ({offer.pending} left)</button>
+                <button type="button" className="btn btn-ghost" onClick={() => chooseMode('mixed')}>Back to mixed</button>
+              </div>
+            ) : (
+              <p>No other criterion has items up for review. New runs add more.</p>
+            )}
+          </EmptyState>
+        </div>
+      ) : !current ? (
         <div className="card">
           <EmptyState title="Nothing to review right now">
             {queue.data?.notes[0] ?? 'Every item that is up for review has a label. New runs add more.'}
@@ -663,7 +950,10 @@ export function QueueView({ itemId }: { itemId?: string } = {}) {
         <>
           <div>
             <div className="row-between small" style={{ marginBottom: '0.3rem' }}>
-              <span aria-live="polite">{position ? `Item ${position.n} of ${position.of} \u00b7 ` : ''}{sessionDone} labelled this session, {items.length} left in this batch{stats ? `, ${stats.pending} up for review in total` : ''}</span>
+              <span aria-live="polite">
+                {position ? `Item ${position.n} of ${position.of} · ` : ''}{sessionDone} labelled this session, {items.length} left in this batch
+                {shownStats ? (oneCriterion ? `, ${pendingHere} up for review for this criterion, ${shownStats.pending} in total` : `, ${shownStats.pending} up for review in total`) : ''}
+              </span>
               <span className="muted">{hint}</span>
             </div>
             <div className="progress-track" role="progressbar" aria-label="Review progress" aria-valuemin={0} aria-valuemax={total} aria-valuenow={sessionDone}>
@@ -674,16 +964,22 @@ export function QueueView({ itemId }: { itemId?: string } = {}) {
           <ItemPicker items={items} currentId={current.itemId} disabled={phase === 'saving'} capped={capped} onPick={jumpTo} />
 
           <article className="review-panel" aria-label="Item to label">
-            <div className="review-section">
-              <div className="review-label">Criterion to judge</div>
-              <div className="criterion-text">{current.criterion.text ?? `(The rubric text is not available. Criterion id: ${current.criterion.id})`}</div>
-              <div className="row small muted" style={{ marginTop: '0.4rem' }}>
-                <span className="mono">{current.criterion.id}</span>
-                {current.criterion.critical ? <CriticalMarker /> : null}
+            {oneCriterion ? (
+              <div className="review-section row small muted">
                 <span>scenario {current.scenarioId}</span>
-                <CriterionLink criterion={current.criterion.id} rubricId={rubricOf(current.scenarioId)} />
               </div>
-            </div>
+            ) : (
+              <div className="review-section">
+                <div className="review-label">Criterion to judge</div>
+                <div className="criterion-text">{current.criterion.text ?? `(The rubric text is not available. Criterion id: ${current.criterion.id})`}</div>
+                <div className="row small muted" style={{ marginTop: '0.4rem' }}>
+                  <span className="mono">{current.criterion.id}</span>
+                  {current.criterion.critical ? <CriticalMarker /> : null}
+                  <span>scenario {current.scenarioId}</span>
+                  <CriterionLink criterion={current.criterion.id} rubricId={rubricOf(current.scenarioId)} />
+                </div>
+              </div>
+            )}
             <div className="review-section">
               <div className="review-label">What the agent was responding to</div>
               <div className="review-text">{current.input}</div>
@@ -739,6 +1035,7 @@ export function QueueView({ itemId }: { itemId?: string } = {}) {
                   <div id="critique-hint" className={showErrors && errors.critique ? 'form-error' : 'form-hint'} role={showErrors && errors.critique ? 'alert' : undefined}>
                     {showErrors && errors.critique ? errors.critique : 'Write enough that a new team member could follow your reasoning. Confirmations need a critique too.'}
                   </div>
+                  {verdict !== null ? <QuickCritiques data={suggestions} disabled={phase === 'saving'} onPick={pickSuggestion} /> : null}
                 </div>
                 <div className="form-group" style={{ maxWidth: 320 }}>
                   <label className="form-label" htmlFor="labeler">Your name</label>
@@ -782,7 +1079,15 @@ export function QueueView({ itemId }: { itemId?: string } = {}) {
                   <>
                     <RevealView reveal={reveal} criterion={{ id: current.criterion.id, rubricId: rubricOf(current.scenarioId) }} />
                     {phase === 'revising' && saved ? (
-                      <ReviseForm itemId={current.itemId} current={saved} idPrefix="revise-current" onSaved={onRevised} onCancel={() => setPhase('revealed')} />
+                      <ReviseForm
+                        itemId={current.itemId}
+                        criterion={current.criterion.id}
+                        current={saved}
+                        idPrefix="revise-current"
+                        onSaved={onRevised}
+                        onCancel={() => setPhase('revealed')}
+                        onSuggestions={setReviseChips}
+                      />
                     ) : (
                       <div>
                         <button type="button" className="btn btn-ghost" onClick={startRevise} disabled={phase !== 'revealed'}>
@@ -965,7 +1270,7 @@ export function LabelsView() {
                                 ) : null}
                                 {l.group ? <div className="small muted">Group: <span className="mono">{l.group}</span></div> : null}
                                 {revising === itemId ? (
-                                  <ReviseForm itemId={itemId} current={l} idPrefix="revise-list" onSaved={() => onRevised(itemId)} onCancel={() => setRevising(null)} />
+                                  <ReviseForm itemId={itemId} criterion={l.criterion} current={l} idPrefix="revise-list" onSaved={() => onRevised(itemId)} onCancel={() => setRevising(null)} />
                                 ) : null}
                                 {rv === undefined ? (
                                   <div className="row">
@@ -997,7 +1302,15 @@ export function LabelsView() {
 
 // ------------------------------------------------------------------ the page
 
-export function ClassifyPage({ tab, onTab, itemId }: { tab: 'queue' | 'labels'; onTab(t: 'queue' | 'labels'): void; itemId?: string }) {
+export function ClassifyPage({
+  tab, onTab, itemId, criterion, onCriterionLink,
+}: {
+  tab: 'queue' | 'labels'
+  onTab(t: 'queue' | 'labels'): void
+  itemId?: string
+  criterion?: string
+  onCriterionLink?(criterion: string | null): void
+}) {
   return (
     <>
       <PageHead
@@ -1014,7 +1327,7 @@ export function ClassifyPage({ tab, onTab, itemId }: { tab: 'queue' | 'labels'; 
         ]}
       />
       <div role="tabpanel" id={`panel-${tab}`} aria-labelledby={`tab-${tab}`}>
-        {tab === 'queue' ? <QueueView itemId={itemId} /> : <LabelsView />}
+        {tab === 'queue' ? <QueueView itemId={itemId} criterion={criterion} onCriterionLink={onCriterionLink} /> : <LabelsView />}
       </div>
     </>
   )

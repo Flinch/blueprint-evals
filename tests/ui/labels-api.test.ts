@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { loadLabels } from '../../src/index.js'
-import type { LabelsResponse, QueueResponse, RevealResponse } from '../../src/ui/api-types.js'
+import type { LabelSuggestionsResponse, LabelsResponse, QueueResponse, RevealResponse } from '../../src/ui/api-types.js'
 import { fixture, type Fixture } from './harness.js'
 import { critiqueOf, saveSuite, type RunSpec } from './records.js'
 
@@ -407,6 +407,188 @@ describe('POST /api/labels/:id/revise', () => {
       expect(r.json().error.message, path).toMatch(/replaces "gone:x", which is not in the file/)
     }
     expect((await revise(f, item.itemId, reviseBody())).json().error.code).toBe('corrupt_record')
+  })
+})
+
+describe('GET /api/queue?criterion=', () => {
+  it('returns only that criterion, in the same blind order and with the same reasons as the unfiltered queue', async () => {
+    const f = await seeded()
+    const all = await queue(f, '?limit=200')
+    for (const criterion of CRITERIA) {
+      const one = await queue(f, `?limit=200&criterion=${criterion}`)
+      expect(one.items.length).toBeGreaterThan(0)
+      expect(one.items.every(i => i.criterion.id === criterion)).toBe(true)
+      // Exactly the unfiltered items for that criterion, in the same order, each with the same reason.
+      const expected = all.items.filter(i => i.criterion.id === criterion)
+      expect(one.items.map(i => [i.itemId, i.reason])).toEqual(expected.map(i => [i.itemId, i.reason]))
+      // Every stat but the page size is about the whole plan.
+      const { queued, ...rest } = one.stats
+      const { queued: allQueued, ...allRest } = all.stats
+      expect(rest).toEqual(allRest)
+      expect(queued).toBe(one.items.length)
+      expect(allQueued).toBe(all.items.length)
+    }
+  })
+
+  it('counts what is up for review per criterion from the whole plan, sorted by id', async () => {
+    const f = await seeded()
+    const all = await queue(f, '?limit=200')
+    const counts = CRITERIA.map(id => ({ id, pending: all.items.filter(i => i.criterion.id === id).length })).filter(c => c.pending > 0)
+    expect(all.stats.byCriterion).toEqual(counts)
+    expect(all.stats.byCriterion.reduce((n, c) => n + c.pending, 0)).toBe(all.stats.pending)
+    // A small page, or a filter, does not change the counts.
+    expect((await queue(f, '?limit=1')).stats.byCriterion).toEqual(counts)
+    expect((await queue(f, `?limit=1&criterion=${CRITERIA[1]}`)).stats.byCriterion).toEqual(counts)
+  })
+
+  it('applies the page limit after the filter, with no random top-up taken from outside the criterion', async () => {
+    const f = await seeded()
+    const all = await queue(f, '?limit=200')
+    const page = await queue(f, `?limit=3&criterion=${CRITERIA[0]}`)
+    expect(page.items.map(i => i.itemId)).toEqual(all.items.filter(i => i.criterion.id === CRITERIA[0]).slice(0, 3).map(i => i.itemId))
+  })
+
+  it('never changes how an item is sampled: a label posted from a filtered page records the plan\'s answer', async () => {
+    const f = await seeded()
+    const all = (await queue(f, '?limit=200')).items
+    const one = (await queue(f, `?limit=200&criterion=${CRITERIA[1]}`)).items
+    // "no-medical-advice" is always a judge pass, so everything listed for it is a random sample.
+    expect(one.every(i => i.reason === 'random')).toBe(true)
+    for (const item of one.slice(0, 2)) {
+      expect(all.find(a => a.itemId === item.itemId)?.reason).toBe(item.reason)
+      const r = await f.api.post('/api/labels', labelBody(item.itemId, { verdict: 'pass', critique: 'Fine.' }))
+      expect(r.status).toBe(201)
+      expect(r.json().label.sampled_by).toBe('random')
+    }
+    // The quota and the counts move as they would for the same labels made in mixed mode.
+    const after = await queue(f, '?limit=200')
+    expect(after.stats).toMatchObject({ labelled: 2, labelledRandom: 2 })
+    expect(after.stats.byCriterion.find(c => c.id === CRITERIA[1])!.pending).toBe(one.length - 2)
+  })
+
+  it('gives an empty list and a note for an unknown criterion, with the stats unchanged', async () => {
+    const f = await seeded()
+    const all = await queue(f, '?limit=200')
+    const none = await queue(f, '?criterion=no-such-criterion')
+    expect(none.items).toEqual([])
+    expect(none.notes.join(' ')).toMatch(/No items for "no-such-criterion" are up for review/)
+    expect({ ...none.stats, queued: 0 }).toEqual({ ...all.stats, queued: 0 })
+    // An empty value is no filter. A very long one is refused.
+    expect((await queue(f, '?limit=200&criterion=')).items.map(i => i.itemId)).toEqual(all.items.map(i => i.itemId))
+    expect((await f.api.get(`/api/queue?criterion=${'x'.repeat(201)}`)).status).toBe(400)
+  })
+
+  it('stays blind', async () => {
+    const f = await seeded()
+    const res = await f.api.get(`/api/queue?limit=200&criterion=${CRITERIA[0]}`)
+    expect(res.text).not.toContain('JUDGE-CRITIQUE')
+    expect(res.text).not.toMatch(/critique/i)
+    expect(res.text).not.toMatch(/"verdict"/)
+  })
+})
+
+describe('GET /api/labels/suggestions', () => {
+  const C = 'confirms-before-acting'
+  const suggest = async (f: Fixture, query: string) => {
+    const r = await f.api.get(`/api/labels/suggestions?${query}`)
+    expect(r.status, query).toBe(200)
+    return r.json<LabelSuggestionsResponse>()
+  }
+  let n = 0
+  /** Writes one label line straight to the file, with a chosen time. Item ids need not be queue items. */
+  async function write(f: Fixture, over: Record<string, unknown>, minute: number) {
+    const { appendLabel } = await import('../../src/store/index.js')
+    return appendLabel(
+      labelsFile(f),
+      { id: `item-${++n}:${(over.criterion as string | undefined) ?? C}`, criterion: C, output: 'o', verdict: 'fail', critique: 'x', labeler: 'ann', sampled_by: 'random', ...over },
+      new Date(Date.UTC(2026, 10, 1, 9, minute)),
+    )
+  }
+  async function empty() {
+    const f = await fixture()
+    fixtures.push(f)
+    return f
+  }
+
+  it('ranks by how often a normalised critique was written, then by the most recent, and shows the latest wording', async () => {
+    const f = await empty()
+    await write(f, { critique: 'Acted without asking.' }, 1)
+    await write(f, { critique: '  acted   WITHOUT asking. ' }, 2)
+    await write(f, { critique: 'Acted without asking.\n' }, 3)
+    await write(f, { critique: 'Never confirmed the time.' }, 4)
+    await write(f, { critique: 'Never confirmed the time.' }, 5)
+    await write(f, { critique: 'Older single.' }, 6)
+    await write(f, { critique: 'Newer single.' }, 7)
+    await write(f, { critique: 'Oldest single.' }, 0)
+    await write(f, { critique: 'Fifth single.' }, 8)
+    const body = await suggest(f, `criterion=${C}&verdict=fail`)
+    expect(body).toEqual({ suggestions: ['Acted without asking.', 'Never confirmed the time.', 'Fifth single.', 'Newer single.'], fromOtherLabelers: false })
+  })
+
+  it('filters by criterion and verdict', async () => {
+    const f = await empty()
+    await write(f, { critique: 'Fail critique.' }, 1)
+    await write(f, { critique: 'Pass critique.', verdict: 'pass' }, 2)
+    await write(f, { critique: 'Other criterion.', criterion: 'no-medical-advice' }, 3)
+    expect((await suggest(f, `criterion=${C}&verdict=fail`)).suggestions).toEqual(['Fail critique.'])
+    expect((await suggest(f, `criterion=${C}&verdict=pass`)).suggestions).toEqual(['Pass critique.'])
+    expect((await suggest(f, 'criterion=no-medical-advice&verdict=fail')).suggestions).toEqual(['Other criterion.'])
+    expect(await suggest(f, 'criterion=nothing-here&verdict=fail')).toEqual({ suggestions: [], fromOtherLabelers: false })
+  })
+
+  it('prefers the named labeler, and falls back to everyone, saying so, when they have none', async () => {
+    const f = await empty()
+    await write(f, { critique: 'Ann wrote this.', labeler: 'ann' }, 1)
+    await write(f, { critique: 'Bo wrote this.', labeler: 'bo' }, 2)
+    await write(f, { critique: 'Bo wrote this.', labeler: 'bo' }, 3)
+    expect(await suggest(f, `criterion=${C}&verdict=fail&labeler=ann`)).toEqual({ suggestions: ['Ann wrote this.'], fromOtherLabelers: false })
+    expect(await suggest(f, `criterion=${C}&verdict=fail&labeler=${encodeURIComponent(' bo ')}`)).toEqual({ suggestions: ['Bo wrote this.'], fromOtherLabelers: false })
+    expect(await suggest(f, `criterion=${C}&verdict=fail&labeler=cy`)).toEqual({ suggestions: ['Bo wrote this.', 'Ann wrote this.'], fromOtherLabelers: true })
+    expect(await suggest(f, `criterion=${C}&verdict=fail`)).toEqual({ suggestions: ['Bo wrote this.', 'Ann wrote this.'], fromOtherLabelers: false })
+    // Nothing from anyone is no fallback.
+    expect(await suggest(f, `criterion=${C}&verdict=pass&labeler=cy`)).toEqual({ suggestions: [], fromOtherLabelers: false })
+  })
+
+  it('leaves out critiques over 300 characters', async () => {
+    const f = await empty()
+    await write(f, { critique: 'y'.repeat(301) }, 1)
+    await write(f, { critique: 'y'.repeat(301) }, 2)
+    await write(f, { critique: 'z'.repeat(300) }, 3)
+    expect((await suggest(f, `criterion=${C}&verdict=fail`)).suggestions).toEqual(['z'.repeat(300)])
+  })
+
+  it('uses the current label of a revised item, and can leave one item out', async () => {
+    const f = await seeded()
+    const item = (await queue(f, '?limit=200')).items.find(i => i.criterion.id === C)!
+    await f.api.post('/api/labels', labelBody(item.itemId, { critique: 'First thought.' }))
+    expect((await suggest(f, `criterion=${C}&verdict=fail`)).suggestions).toEqual(['First thought.'])
+    await f.api.post(`/api/labels/${encodeURIComponent(item.itemId)}/revise`, { labeler: 'ann', verdict: 'pass', critique: 'Second thought.' })
+    expect((await suggest(f, `criterion=${C}&verdict=fail`)).suggestions).toEqual([])
+    expect((await suggest(f, `criterion=${C}&verdict=pass`)).suggestions).toEqual(['Second thought.'])
+    expect((await suggest(f, `criterion=${C}&verdict=pass&exclude=${encodeURIComponent(item.itemId)}`)).suggestions).toEqual([])
+  })
+
+  it('never includes the judge\'s critiques', async () => {
+    const f = await seeded()
+    const items = (await queue(f, '?limit=200')).items
+    for (const item of items.slice(0, 4)) await f.api.post('/api/labels', labelBody(item.itemId, { critique: `Mine for ${item.itemId}` }))
+    for (const c of CRITERIA) {
+      for (const v of ['pass', 'fail']) {
+        const r = await f.api.get(`/api/labels/suggestions?criterion=${c}&verdict=${v}`)
+        expect(r.text).not.toContain('JUDGE-CRITIQUE')
+      }
+    }
+  })
+
+  it('refuses a missing criterion or a bad verdict, and a corrupt file', async () => {
+    const f = await seeded()
+    for (const q of ['verdict=fail', `criterion=${C}`, `criterion=${C}&verdict=maybe`, '']) {
+      const r = await f.api.get(`/api/labels/suggestions?${q}`)
+      expect(r.status, q).toBe(400)
+      expect(r.json().error.code).toBe('bad_request')
+    }
+    writeFileSync(labelsFile(f), 'not json\n')
+    expect((await f.api.get(`/api/labels/suggestions?criterion=${C}&verdict=fail`)).json().error.code).toBe('corrupt_record')
   })
 })
 

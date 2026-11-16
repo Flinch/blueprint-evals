@@ -272,6 +272,12 @@ The review queue draws targeted items (failures, runs that disagree with
 repeats) and a random quota, which defaults to at least 30 percent of reviewed
 items. Every label records which way it was sampled.
 
+Labelling one criterion at a time (the review queue's criterion mode) filters
+the queue after this sampling. Which items are up for review, how each was
+sampled and the quota are the same as in mixed mode, and the items keep their
+blind display order, so position still says nothing about why an item is
+there. See "One criterion at a time" in 0003.
+
 ### Labelers
 
 Each label records who made it. With two labelers on overlapping items, the

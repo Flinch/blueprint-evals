@@ -237,7 +237,7 @@ export const queueItem = (over: Partial<QueueItem> = {}): QueueItem => ({
 
 export const queue = (over: Partial<QueueResponse> = {}): QueueResponse => ({
   items: [queueItem(), queueItem({ itemId: 'run-ok-2:confirms-before-acting', runId: 'run-ok-2', output: 'I can move it to 15:00. Shall I go ahead?', reason: 'random', outputTurn: 1, group: 'run-ok-2' })],
-  stats: { candidates: 10, notApplicable: 0, pending: 4, queued: 2, labelled: 5, labelledRandom: 1, labelledRandomShare: 0.2, minRandomShare: 0.3, quotaMet: false },
+  stats: { candidates: 10, notApplicable: 0, pending: 4, queued: 2, labelled: 5, labelledRandom: 1, labelledRandomShare: 0.2, minRandomShare: 0.3, quotaMet: false, byCriterion: [{ id: 'confirms-before-acting', pending: 4 }] },
   notes: [],
   ...over,
 })

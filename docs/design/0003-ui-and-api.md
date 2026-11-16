@@ -382,8 +382,14 @@ Use `EventSource` (it sends the cookie). See the next section.
 
 ### Labelling
 
-**`GET /api/queue?limit=25`** returns `QueueResponse` (`limit` 1 to 200). See
-[Blind labelling](#blind-labelling-and-the-random-quota).
+**`GET /api/queue?limit=25&criterion=<id>`** returns `QueueResponse` (`limit` 1 to
+200). `criterion` is optional: with it, the items are only that criterion's,
+filtered from the finished plan before the page limit is applied, so what is up
+for review, each item's `reason` and the stats are the same as without it (see
+[One criterion at a time](#one-criterion-at-a-time)). An unknown criterion, or
+one with nothing left, gives an empty list and a note. `stats.byCriterion` lists
+every criterion with items up for review and how many, by id, from the whole
+plan. See [Blind labelling](#blind-labelling-and-the-random-quota).
 
 **`POST /api/labels`** takes `LabelRequest` and returns 201 `LabelResponse`:
 
@@ -405,6 +411,14 @@ each changed item, keyed by item id, the versions it superseded, oldest first),
 and `LabelStats` (counts of items, random share, verdict counts, split counts,
 labelers, `revisions` (how many items were changed), and the same sanity
 warnings `evals validate` gives).
+
+**`GET /api/labels/suggestions?criterion=<id>&verdict=pass|fail`** returns
+`LabelSuggestionsResponse`: up to four earlier critiques for that criterion and
+verdict, to offer as one-click phrases (see [Quick critiques](#quick-critiques)).
+Optional `labeler` prefers that person's critiques, and `exclude` (an item id)
+leaves out that item's own label, which the page uses when changing a label.
+Errors: 400 for a missing criterion or a verdict other than `pass` or `fail`,
+422 `corrupt_record` for a broken label file.
 
 **`GET /api/labels/:id/reveal`** returns `RevealResponse` for an item, with `:id`
 the item id, URL-encoded (item ids contain a colon). It returns the judge's
@@ -571,8 +585,9 @@ runs and the label file:
    judge pass that was not sampled is not offered.
 4. **Order** is by `sha256(seed | "order" | itemId)`, independent of the sampling
    hash and of the reason.
-5. **A page** is the first `limit` of that order, with a guarantee: if the page has
-   fewer than `ceil(0.3 x limit)` random items (capped by how many exist), the last
+5. **A page** is the first `limit` of that order (of one criterion's items, when
+   `criterion` is given), with a guarantee in mixed mode: if the page has fewer
+   than `ceil(0.3 x limit)` random items (capped by how many exist), the last
    targeted items are swapped for the next random ones.
 
 Consequences, all tested:
@@ -627,6 +642,67 @@ the queue is still refused (422 `item_not_in_queue`), the picker cannot offer on
 and a deep link to one just falls back to the first item. `sampled_by` is decided
 from the whole plan (`findQueueItem` runs the plan with no page limit), so how many
 items the page loaded, and which one the person chose first, does not change it.
+
+### One criterion at a time
+
+Labelling is faster when the same question stays in mind for a run of items.
+The review queue has a mode switch: **Mixed** (the default, every criterion in
+the queue's own order) and **One criterion at a time**. In the second mode a
+select lists every criterion with items up for review, with its count
+("protects-other-patients (14 left)"), sorted by id, from `stats.byCriterion`. The
+chosen criterion's text, its Critical flag and the "View or edit this criterion"
+link are pinned to the top of the page (sticky under the top bar), and each item
+shows only its scenario instead of repeating the criterion.
+
+The page asks for `GET /api/queue?criterion=<id>`. **The filter runs after the
+plan**, so it changes which items are on the page and nothing else:
+
+- What is up for review, each item's `reason`, and therefore `sampled_by` and
+  the random quota, are exactly as in mixed mode. `findQueueItem` (used when a
+  label is posted) never sees the filter.
+- The items keep the blind display order (the order hash), so within a criterion
+  position still says nothing about why an item is there.
+- All the stats come from the whole plan. Only `queued`, the page size, differs.
+- A one-criterion page gets no per-page random top-up. In mixed mode a page
+  swaps its last targeted items for random ones until it has its share; doing
+  that inside a criterion would pull items out of the blind order for no gain,
+  because the plan already holds the quota across the whole queue.
+
+When a criterion runs out the page says so and offers the next criterion by id
+that has items left (wrapping round), or a way back to mixed.
+
+`#/classify?criterion=<id>` opens this mode on that criterion. It composes with
+`item=`, and the item wins: the page opens the item's own criterion (the part of
+the item id after the first colon), with the item current. Choosing a mode or a
+criterion on the page puts it in the address (replacing the history entry), and
+the last mode is remembered in `localStorage` inside try/catch. An address that
+names a criterion wins over the remembered mode. With the mode remembered but no
+criterion named, the page starts on the first criterion by id that has items.
+
+### Quick critiques
+
+Many critiques repeat. Once a verdict is chosen, in the first label form and in
+"Change my label", up to four one-click phrases appear under the critique box.
+They come from `GET /api/labels/suggestions`:
+
+- **The person's own earlier critiques** for the same criterion and verdict, from
+  the current labels (a changed label counts with its latest critique). The page
+  sends the name in the "Your name" field as `labeler`. If that person has none,
+  everyone's are used and the page says they are from other labelers. With no
+  name, everyone's are used.
+- **Ranked by how often** the normalised text (trimmed, whitespace collapsed,
+  case ignored) was written, ties by the most recent. Each is shown as last
+  written. Critiques over 300 characters are left out, as too specific to one
+  item. With none to offer there are no chips, and there are no generic defaults.
+- **Nothing from the judge.** The endpoint reads only the label file.
+
+A chip shows the start of the text, with the whole text in its title. Clicking
+it fills an empty critique box. When the box already has text the phrase goes on
+a new line after it, so nothing typed is lost and no undo is needed. The box
+stays editable. Keys 1 to 4 insert the matching chip while focus is outside a
+text field, so typing a digit in the critique box still types it. When changing
+a label, the item's own current critique is left out (`exclude`), since it is
+already in the box.
 
 ## Editing a rubric
 
@@ -722,7 +798,7 @@ runtime dependencies are unchanged.
 | `#/` | Overview: goal-achieved rate first, pass rate, runs, cost (null shown as unknown), trend, failures by tag, failing criteria and checks |
 | `#/runs`, `#/runs/<runId>` | Suites, filtered run list, and run detail with transcript, tool calls, checks (skipped shown apart from pass), criteria with critiques (N/A criteria listed apart, muted and marked "Not graded"), goal, score (n/a when no criterion applied), cost, trace |
 | `#/launch` | Choose scenarios and a cap, preview, confirm, then live progress from the event stream and cancel |
-| `#/classify`, `#/classify?item=<itemId>`, `#/classify/labels` | Blind review queue (with a picker, and a deep link to one item), and the label list |
+| `#/classify`, `#/classify?item=<itemId>`, `#/classify?criterion=<id>`, `#/classify/labels` | Blind review queue (with a picker, a deep link to one item, and one-criterion mode), and the label list |
 | `#/calibration` | Choose rubric, split and selection, preview, confirm, then the report with the true negative rate first |
 | `#/scenarios`, `#/scenarios?tab=rubrics&rubric=<id>&criterion=<id>` | Scenarios (read-only), rubrics with an Edit button, and validation problems. The deep link opens the Rubrics tab and highlights that criterion and its worked examples |
 
@@ -752,6 +828,15 @@ Choices worth knowing:
   what was changed. The label list offers the same action on each label and
   marks changed labels "Revised". Nothing about the judge appears before the
   first label is saved, and only a labelled item can be changed.
+- **One criterion at a time.** A mode switch on the review queue filters it to
+  one criterion with `GET /api/queue?criterion=`, pins the criterion to the top
+  of the page, and offers the next criterion when one runs out. See
+  [One criterion at a time](#one-criterion-at-a-time).
+- **Quick critiques.** After a verdict is chosen, up to four of the person's own
+  earlier critiques for that criterion and verdict appear as chips under the
+  critique box, in the first label form and in "Change my label". Keys 1 to 4
+  insert one when focus is outside a text field. See
+  [Quick critiques](#quick-critiques).
 - **Editing a rubric.** See [Editing a rubric](#editing-a-rubric). Classify (next
   to the criterion, before and after the reveal) and the disagreements in a
   calibration report link to the criterion with "View or edit this criterion".
@@ -1295,6 +1380,18 @@ export interface LabelsResponse {
   /** For each item whose label was changed, keyed by item id: the superseded versions, oldest first (the blind label first). */
   history: Record<string, Label[]>
   stats: LabelStats
+}
+
+/**
+ * GET /api/labels/suggestions?criterion=&verdict=&labeler=&exclude=: up to
+ * four of the labeler's own earlier critiques for that criterion and verdict,
+ * most often written first, as one-click phrases. Taken from the current
+ * labels only, never from the judge.
+ */
+export interface LabelSuggestionsResponse {
+  suggestions: string[]
+  /** True when the named labeler had none, so these are other people's critiques. */
+  fromOtherLabelers: boolean
 }
 
 export type RevealResponse = Reveal
