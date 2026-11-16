@@ -314,6 +314,29 @@ rates are the safer estimate when they differ. A high rate of revisions toward
 the judge is a signal in its own right: it often means the rubric wording is
 unclear, and the criterion needs rewording before more labelling.
 
+### When the judge disagrees
+
+Read each disagreement and decide which of two things happened before changing
+anything:
+
+- **The judge misread the rubric.** The rubric says what you mean and the judge
+  got it wrong. That is a judge error. It counts against the judge in the rates,
+  and the fixes are on the judge's side (a clearer worked example of the case it
+  missed, a different model or effort).
+- **The judge followed a rubric you disagree with.** The judge did what the
+  criterion and its worked examples say, and they say something you would not
+  sign. For example, a criterion that fails a refusal you would pass, and a
+  worked example that teaches the same. Relabelling toward the rubric would hide
+  the problem. The fix is the rubric: change the criterion's wording and its
+  worked examples together, so they teach one rule, then run calibration again on
+  `dev`. A worked example left behind keeps teaching the old rule.
+
+The web UI links each disagreement (in Classify after the reveal, and in a
+calibration report) to the criterion on the Scenarios page, where the rubric can
+be edited. The edit writes the rubric file, bumps its version and says how many
+labels were made against the old wording (see
+[0003](0003-ui-and-api.md#editing-a-rubric)).
+
 ### Judge identity and variability
 
 - Every grade records the judge's model, effort and a hash of its prompt and

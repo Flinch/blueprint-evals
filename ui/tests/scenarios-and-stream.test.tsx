@@ -9,7 +9,7 @@ import { grader, preview, rubrics, scenarios } from './fixtures'
 beforeEach(() => installEventSource())
 
 describe('scenarios page', () => {
-  it('lists scenarios and rubrics read-only, with checks, criteria and anchors', async () => {
+  it('lists scenarios read-only, and rubrics with their criteria and anchors', async () => {
     const user = userEvent.setup()
     installFetch(baseRoutes())
     renderApp('/scenarios')

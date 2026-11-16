@@ -1,12 +1,16 @@
-import { useState } from 'react'
-import type { RubricItem, ScenarioItem } from '../../../src/ui/api-types'
+import { useEffect, useRef, useState } from 'react'
+import type { RubricItem, RubricUpdateResponse, ScenarioItem } from '../../../src/ui/api-types'
 import { api } from '../api/client'
 import { useAsync } from '../api/useAsync'
-import { Banner, CriticalMarker, Disclosure, EmptyState, ErrorState, JsonBlock, Loading, PageHead, StatusBadge, Tabs, TagList, VerdictBadge } from '../components/ui'
+import { LabelImpactLine, RubricEditor } from '../components/RubricEditor'
+import { Banner, CriticalMarker, Disclosure, EmptyState, ErrorState, JsonBlock, Loading, PageHead, StatusBadge, Tabs, TagList, VerdictBadge, Warnings } from '../components/ui'
 import { plural } from '../lib/format'
 
-// Read-only. Scenarios and rubrics are files in a repository, reviewed like
-// code, so this page shows them and what is wrong with them. It edits nothing.
+// Scenarios and rubrics are files in a repository, reviewed like code, so this
+// page shows them and what is wrong with them. A rubric can be edited here, to
+// close the loop from a disagreement in Classify or Calibration to the rule the
+// judge followed. The edit writes the rubric's own file, so it is reviewed with
+// git diff like any other change. Scenarios are read-only.
 
 function ScenarioCard({ item }: { item: ScenarioItem }) {
   const s = item.scenario
@@ -57,20 +61,73 @@ function ScenarioCard({ item }: { item: ScenarioItem }) {
   )
 }
 
-function RubricCard({ item }: { item: RubricItem }) {
+const SAFE_CRITERION = /^[a-z0-9][a-z0-9._-]*$/
+
+function RubricCard({ item, focus, onSaved, onReload }: { item: RubricItem; focus?: string; onSaved(res: RubricUpdateResponse): void; onReload(): void }) {
   const r = item.rubric
+  const [editing, setEditing] = useState(false)
+  const [saved, setSaved] = useState<RubricUpdateResponse | null>(null)
+  const box = useRef<HTMLDetailsElement>(null)
+
+  // A deep link opens the card and brings the criterion into view.
+  useEffect(() => {
+    if (!focus || !box.current) return
+    box.current.open = true
+    if (!SAFE_CRITERION.test(focus)) return
+    const el = box.current.querySelector<HTMLElement>(`[data-criterion="${focus}"]`)
+    el?.scrollIntoView?.({ block: 'center' })
+  }, [focus, editing])
+
+  if (editing) {
+    return (
+      <details className="disclosure" ref={box} open>
+        <summary>
+          <span className="verdict-name">{r.id}</span>
+          <span className="small muted">version {r.version}</span>
+          <span className="badge badge-accent">Editing</span>
+        </summary>
+        <div className="disclosure-body">
+          <RubricEditor
+            item={item}
+            focus={focus}
+            onSaved={res => {
+              setSaved(res)
+              setEditing(false)
+              onSaved(res)
+            }}
+            onCancel={() => setEditing(false)}
+            onReload={() => {
+              setEditing(false)
+              onReload()
+            }}
+          />
+        </div>
+      </details>
+    )
+  }
+
   return (
-    <details className="disclosure">
+    <details className="disclosure" ref={box}>
       <summary>
         <span className="verdict-name">{r.id}</span>
         <span className="small muted">version {r.version}</span>
         <span className="small muted">{plural(r.criteria.length, 'criterion', 'criteria')}, {plural(r.anchors.length, 'anchor')}</span>
       </summary>
       <div className="disclosure-body stack">
-        <dl className="facts">
-          <dt>File</dt><dd className="break">{item.file}</dd>
-          <dt>Used by</dt><dd>{item.usedBy.length === 0 ? 'No scenario' : item.usedBy.join(', ')}</dd>
-        </dl>
+        {saved ? (
+          <Banner kind="success" title={`Saved as version ${saved.version}.`} role="status">
+            The change is in <span className="mono break">{saved.item.relativeFile}</span>. Review it with git diff like any other change.
+            {saved.labelImpact.filter(x => x.labels > 0).map(x => <LabelImpactLine key={x.criterion} {...x} />)}
+          </Banner>
+        ) : null}
+        {saved ? <Warnings items={saved.warnings} /> : null}
+        <div className="row-between" style={{ alignItems: 'flex-start' }}>
+          <dl className="facts" style={{ margin: 0 }}>
+            <dt>File</dt><dd className="break" title={item.file}>{item.relativeFile}</dd>
+            <dt>Used by</dt><dd>{item.usedBy.length === 0 ? 'No scenario' : item.usedBy.join(', ')}</dd>
+          </dl>
+          <button type="button" className="btn btn-ghost btn-sm" aria-label={`Edit ${r.id}`} onClick={() => { setSaved(null); setEditing(true) }}>Edit</button>
+        </div>
         {r.context ? (
           <div>
             <div className="review-label">Reference facts (shown to the judge as ground truth)</div>
@@ -81,7 +138,7 @@ function RubricCard({ item }: { item: RubricItem }) {
           <div className="review-label">Criteria</div>
           <div className="verdict-list">
             {r.criteria.map(c => (
-              <div className="verdict-item" key={c.id}>
+              <div className={`verdict-item${focus === c.id ? ' highlight' : ''}`} key={c.id} data-criterion={c.id}>
                 <div className="verdict-top">
                   <span className="verdict-name">{c.id}</span>
                   {c.critical ? <CriticalMarker /> : null}
@@ -99,7 +156,7 @@ function RubricCard({ item }: { item: RubricItem }) {
           ) : (
             <div className="stack-sm">
               {r.anchors.map((a, i) => (
-                <div className="card-sm" key={i}>
+                <div className={`card-sm${focus !== undefined && a.criterion === focus ? ' highlight' : ''}`} key={i}>
                   <div className="row" style={{ marginBottom: '0.4rem' }}>
                     <VerdictBadge verdict={a.verdict} />
                     <span className="small mono">{a.criterion ?? 'whole rubric'}</span>
@@ -118,18 +175,53 @@ function RubricCard({ item }: { item: RubricItem }) {
 }
 
 type Tab = 'scenarios' | 'rubrics' | 'validation'
+const isTab = (t: string | null | undefined): t is Tab => t === 'scenarios' || t === 'rubrics' || t === 'validation'
 
-export function ScenariosPage() {
+/** What the address asked for: `#/scenarios?tab=rubrics&rubric=<id>&criterion=<id>`. */
+export interface ScenariosLink {
+  tab?: string | null
+  rubric?: string | null
+  criterion?: string | null
+}
+
+const linkTab = (link: ScenariosLink): Tab | null => (isTab(link.tab) ? link.tab : link.rubric || link.criterion ? 'rubrics' : null)
+
+export function ScenariosPage({ link = {} }: { link?: ScenariosLink } = {}) {
   const scenarios = useAsync(() => api.scenarios(), [])
   const rubrics = useAsync(() => api.rubrics(), [])
-  const [tab, setTab] = useState<Tab>('scenarios')
+  const [tab, setTab] = useState<Tab>(() => linkTab(link) ?? 'scenarios')
+
+  // A new deep link while the page is open.
+  useEffect(() => {
+    const t = linkTab(link)
+    if (t) setTab(t)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [link.tab, link.rubric, link.criterion])
+
+  // The rubric a link points at: by id, or the first that has the criterion.
+  const items = rubrics.data?.rubrics ?? []
+  const criterion = link.criterion || undefined
+  const target = link.rubric ? items.find(i => i.rubric.id === link.rubric) : criterion ? items.find(i => i.rubric.criteria.some(c => c.id === criterion)) : undefined
+  const linkProblem = !rubrics.data || (!link.rubric && !criterion)
+    ? null
+    : !target
+      ? link.rubric ? `There is no rubric "${link.rubric}".` : `No rubric has a criterion "${criterion}".`
+      : criterion && !target.rubric.criteria.some(c => c.id === criterion)
+        ? `Rubric "${target.rubric.id}" has no criterion "${criterion}".`
+        : null
+
+  const onSaved = (res: RubricUpdateResponse) =>
+    rubrics.setData(prev => (prev ? { ...prev, rubrics: prev.rubrics.map(i => (i.file === res.item.file ? res.item : i)) } : prev))
 
   const problemCount = (scenarios.data?.validation.errors.length ?? 0) + (rubrics.data?.problems.length ?? 0)
   const warningCount = scenarios.data?.validation.warnings.length ?? 0
 
   return (
     <>
-      <PageHead title="Scenarios" sub="The scenarios and rubrics the server reads. They are files in your repository, so this page only shows them." />
+      <PageHead
+        title="Scenarios"
+        sub="The scenarios and rubrics the server reads. They are files in your repository. Edits to a rubric made here write to that file, so they show up in git diff for review like any other change."
+      />
       {problemCount > 0 ? (
         <div style={{ marginBottom: '1rem' }}>
           <Banner kind="danger" title={`${plural(problemCount, 'problem')} found.`} role="alert">
@@ -171,7 +263,18 @@ export function ScenariosPage() {
           ) : rubrics.data && rubrics.data.rubrics.length === 0 ? (
             <div className="card"><EmptyState title="No rubrics found">Scenarios refer to a rubric file with the rubric key.</EmptyState></div>
           ) : (
-            <div className="stack-sm">{rubrics.data?.rubrics.map(i => <RubricCard key={i.file + i.rubric.id} item={i} />)}</div>
+            <div className="stack-sm">
+              {linkProblem ? <Banner kind="info" role="status">{linkProblem}</Banner> : null}
+              {items.map(i => (
+                <RubricCard
+                  key={i.file + i.rubric.id}
+                  item={i}
+                  focus={i === target && criterion && i.rubric.criteria.some(c => c.id === criterion) ? criterion : undefined}
+                  onSaved={onSaved}
+                  onReload={rubrics.reload}
+                />
+              ))}
+            </div>
           )
         ) : null}
 

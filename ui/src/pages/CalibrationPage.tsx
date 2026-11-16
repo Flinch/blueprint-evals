@@ -6,6 +6,7 @@ import { IntervalBar } from '../components/charts'
 import { PreviewPanel, scopeSentence } from '../components/PreviewPanel'
 import { Banner, ConfirmDialog, Disclosure, EmptyState, ErrorState, Loading, PageHead, StatusBadge, Warnings } from '../components/ui'
 import { fullDate, percent, plural, tokens, usd } from '../lib/format'
+import { criterionHref } from '../lib/router'
 import { useHealth } from '../state/HealthContext'
 import { useRunStream } from '../state/RunStreamProvider'
 import { LaunchError } from './LaunchPage'
@@ -57,6 +58,7 @@ function HowToRead() {
         <li><strong>Random or all.</strong> Random uses only randomly sampled labels, which can estimate the judge's accuracy. All adds labels picked because they looked like trouble, and then the rates describe the sample reviewed.</li>
       </ul>
       <p>Disagreements are listed with both critiques side by side. Reading them is the point of the exercise: they show what the judge misses and where the rubric is unclear.</p>
+      <p>For each one, first decide whether the judge misread the rubric or followed a rule you disagree with. The second is fixed in the rubric: open the criterion, change its wording and its worked examples together, then measure again on dev.</p>
     </Disclosure>
   )
 }
@@ -169,6 +171,7 @@ export function CalibrationReportView({ record }: { record: CalibrationRecord })
                   <span className="small">Expert <StatusBadge status={d.expert} /></span>
                   <span className="small">Judge <StatusBadge status={d.judge} /></span>
                   {d.expert === 'fail' && d.judge === 'pass' ? <span className="badge badge-critical">Judge passed a failure</span> : null}
+                  <a className="small" href={criterionHref(d.criterion, record.rubricId)} style={{ marginLeft: 'auto' }}>View or edit this criterion</a>
                 </div>
                 <div className="compare">
                   <div className="crit-box"><h4>Expert critique</h4>{d.expertCritique}</div>

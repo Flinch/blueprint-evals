@@ -16,7 +16,7 @@ describe('docs/design/0003-ui-and-api.md', () => {
   })
 
   it('has no endpoint the server does not have', () => {
-    const mentioned = [...doc.matchAll(/\*\*`((?:GET|POST) \/api\/[^`?]*)/g)].map(m => m[1]!)
+    const mentioned = [...doc.matchAll(/\*\*`((?:GET|POST|PUT) \/api\/[^`?]*)/g)].map(m => m[1]!)
     expect(mentioned.length).toBeGreaterThan(10)
     for (const m of mentioned) expect(API_ROUTES as readonly string[], m).toContain(m)
   })

@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto'
-import { existsSync, realpathSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
@@ -12,7 +12,7 @@ import type { ModelProvider, Reporter } from '../core/interfaces.js'
 import { loadConfig, loadScenarios } from '../core/load.js'
 import { loadLabels } from '../calibration/labels.js'
 import { executeCalibration, planCalibration } from '../engine/calibrate.js'
-import { loadCatalog, type Catalog } from '../engine/catalog.js'
+import { loadCatalog, type Catalog, type LoadedRubric } from '../engine/catalog.js'
 import { UsageError } from '../engine/errors.js'
 import { providerErrors, crossCheck, modelNeeds, needsModel } from '../engine/plan.js'
 import { executeRun, planRun, PlanProblemsError, type RunPlan } from '../engine/run.js'
@@ -24,16 +24,18 @@ import {
 } from '../store/index.js'
 import type {
   ActiveJob, ApiErrorBody, CalibratePreviewResponse, CalibrateStartResponse, CalibrationResponse, ErrorCode, HealthResponse, LabelResponse,
-  LabelsResponse, OverviewResponse, QueueResponse, RevealResponse, RubricsResponse, RunCancelResponse, RunPreviewResponse, RunResponse,
-  RunsResponse, RunStartResponse, RunStatusResponse, ScenariosResponse, SuiteResponse, SuitesResponse,
+  LabelImpact, LabelsResponse, OverviewResponse, QueueResponse, RevealResponse, RubricItem, RubricsResponse, RubricUpdateResponse, RunCancelResponse,
+  RunPreviewResponse, RunResponse, RunsResponse, RunStartResponse, RunStatusResponse, ScenariosResponse, SuiteResponse, SuitesResponse,
 } from '../ui/api-types.js'
 import {
   ApiError, BASE_HEADERS, errorBody, readJson, sendJson, type Scrub,
 } from './http.js'
 import { createPreviewTokens, digest } from './preview-token.js'
 import { createScrubber, secretValues } from './redact.js'
+import { applyRubricEdit, sha256 } from './rubric-edit.js'
 import { createSecurity, LOOPBACK_HOST, type Security } from './security.js'
 import { createEventHub } from './sse.js'
+import { writeFileAtomic } from '../store/fs.js'
 import { DEFAULT_STATIC_DIR, isBuilt, sendUnauthorizedPage, serveStatic } from './static.js'
 import { buildOverview, runEndSummary, runListItem, suiteListItem } from './views.js'
 
@@ -86,6 +88,7 @@ export const API_ROUTES = [
   'GET /api/runs/:runId',
   'GET /api/scenarios',
   'GET /api/rubrics',
+  'PUT /api/rubrics/:id',
   'POST /api/run/preview',
   'POST /api/run/start',
   'GET /api/run/status',
@@ -133,6 +136,18 @@ const labelAnswerShape = {
 }
 const LabelRequestSchema = z.strictObject({ itemId: z.string().min(1).max(300), ...labelAnswerShape })
 const ReviseRequestSchema = z.strictObject(labelAnswerShape)
+
+// The shape only. What the values mean (the criteria match the file, each example
+// is valid) is checked against the file, and a failure there is a 422.
+const RubricUpdateSchema = z.strictObject({
+  baseHash: z.string().regex(/^[0-9a-f]{64}$/, 'baseHash must be the hash from GET /api/rubrics'),
+  criteria: z
+    .array(z.strictObject({ id: z.string().min(1).max(200), text: z.string().max(50_000), weight: z.number().optional(), critical: z.boolean().optional() }))
+    .max(1000),
+  context: z.string().max(200_000).nullable(),
+  anchors: z.array(z.unknown()).max(1000),
+  version: z.string().trim().min(1).max(100).optional(),
+})
 
 function parseBody<T extends z.ZodType>(schema: T, body: unknown): z.infer<T> {
   const parsed = schema.safeParse(body)
@@ -231,6 +246,20 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServer>
     }
   }
 
+  /** The working directory, the config's directory and the configured scenarios path: the only places a request may point at. */
+  function insideAllowedRoots(real: string): boolean {
+    const roots = [workdir, ...(configFile ? [dirname(configFile)] : []), ...(scenarioPath ? [statSafe(scenarioPath)?.isDirectory() ? scenarioPath : dirname(scenarioPath)] : [])]
+    return roots.some(r => {
+      let base: string
+      try {
+        base = realpathSync(r)
+      } catch {
+        return false
+      }
+      return real === base || real.startsWith(base + sep)
+    })
+  }
+
   /** A request's `path` may point only inside the working directory, the config's directory or the configured scenarios path. */
   function resolveScenarioPath(requested: string | undefined): string {
     if (requested === undefined) {
@@ -240,23 +269,13 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServer>
       return scenarioPath
     }
     const full = resolve(workdir, requested)
-    const roots = [workdir, ...(configFile ? [dirname(configFile)] : []), ...(scenarioPath ? [statSafe(scenarioPath)?.isDirectory() ? scenarioPath : dirname(scenarioPath)] : [])]
     let real: string
     try {
       real = realpathSync(full)
     } catch {
       throw new ApiError(422, 'plan_invalid', `Scenarios path not found: ${shownPath(full)}`, { errors: ['scenarios path not found'] })
     }
-    const inside = roots.some(r => {
-      let base: string
-      try {
-        base = realpathSync(r)
-      } catch {
-        return false
-      }
-      return real === base || real.startsWith(base + sep)
-    })
-    if (!inside) throw new ApiError(400, 'bad_request', 'path must be inside the working directory, the config directory or the scenarios path.')
+    if (!insideAllowedRoots(real)) throw new ApiError(400, 'bad_request', 'path must be inside the working directory, the config directory or the scenarios path.')
     return full
   }
 
@@ -268,8 +287,25 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServer>
     }
   }
 
+  // Read from disk on every call, never cached, so an edit to a rubric (from this page or an editor) shows everywhere at once.
   function catalog(): Catalog | null {
     return scenarioPath && existsSync(scenarioPath) ? loadCatalog(scenarioPath) : null
+  }
+
+  function rubricItem(r: LoadedRubric, cat: Catalog): RubricItem {
+    let hash = ''
+    try {
+      hash = sha256(readFileSync(r.file))
+    } catch {
+      // Gone since the catalog read it. An edit then fails with stale, which is right.
+    }
+    return {
+      rubric: r.rubric,
+      file: r.file,
+      relativeFile: shownPath(r.file),
+      hash,
+      usedBy: cat.scenarios.filter(l => l.rubric?.id === r.rubric.id).map(l => l.scenario.id),
+    }
   }
 
   // ---- run planning (shared by preview and start)
@@ -494,13 +530,59 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServer>
       const cat = catalog()
       const body: RubricsResponse = {
         path: scenarioPath,
-        rubrics: (cat?.rubrics ?? []).map(r => ({
-          rubric: r.rubric,
-          file: r.file,
-          usedBy: (cat?.scenarios ?? []).filter(l => l.rubric?.id === r.rubric.id).map(l => l.scenario.id),
-        })),
+        rubrics: cat ? cat.rubrics.map(r => rubricItem(r, cat)) : [],
         problems: cat?.problems ?? [],
       }
+      return { body }
+    },
+
+    // Writes the one file the rubric was loaded from. The client never names a path.
+    'PUT /api/rubrics/:id': async ({ req, params }) => {
+      const request = parseBody(RubricUpdateSchema, await readJson(req, maxBody))
+      const id = params.id!
+      const found = catalog()?.rubrics.filter(r => r.rubric.id === id) ?? []
+      if (found.length === 0) throw new ApiError(404, 'not_found', `No rubric "${id}".`)
+      if (found.length > 1) {
+        throw new ApiError(422, 'rubric_invalid', `More than one file defines rubric "${id}" (${found.map(r => shownPath(r.file)).join(', ')}). Give each its own id before editing it here.`)
+      }
+      const file = found[0]!.file
+      let real: string
+      let bytes: Buffer
+      try {
+        real = realpathSync(file)
+        bytes = readFileSync(real)
+      } catch {
+        throw new ApiError(409, 'stale', `${shownPath(file)} is gone since the page read it. Reload to see what is there now.`)
+      }
+      if (!insideAllowedRoots(real)) {
+        throw new ApiError(422, 'rubric_invalid', `${shownPath(file)} is outside the working directory, the config directory and the scenarios path, so the page does not write it. Edit it in your editor.`)
+      }
+      if (sha256(bytes) !== request.baseHash) {
+        throw new ApiError(409, 'stale', `${shownPath(file)} changed on disk since the page read it, so nothing was saved. Reload to see the current file, then make the edit again.`)
+      }
+      // Everything from here to the write is synchronous, so two edits cannot both pass the hash check.
+      const applied = applyRubricEdit(bytes.toString('utf8'), request)
+
+      // Counted before the write, from the same current labels calibration uses. It is information only, so a bad label file does not stop the save.
+      const warnings: string[] = []
+      let labelImpact: LabelImpact[] = applied.textChanged.map(criterion => ({ criterion, labels: 0 }))
+      try {
+        const current = existsSync(labelsFile) ? resolveLabels(listLabels(labelsFile)).current : []
+        labelImpact = applied.textChanged.map(criterion => ({ criterion, labels: current.filter(l => l.criterion === criterion).length }))
+      } catch (e) {
+        warnings.push(`The labels could not be counted, so the number made against the old wording is unknown: ${message(e)}`)
+      }
+
+      try {
+        writeFileAtomic(real, applied.text)
+      } catch (e) {
+        throw new ApiError(500, 'store_unwritable', `Cannot write ${shownPath(file)}: ${message(e)}. The file was not changed.`)
+      }
+
+      const cat = catalog()
+      const fresh = cat?.rubrics.find(r => r.file === file)
+      const item = fresh && cat ? rubricItem(fresh, cat) : { rubric: applied.rubric, file, relativeFile: shownPath(file), hash: sha256(applied.text), usedBy: [] }
+      const body: RubricUpdateResponse = { item, version: item.rubric.version, hash: item.hash, labelImpact, warnings }
       return { body }
     },
 

@@ -13,7 +13,7 @@ import type { CalibrationReport } from '../calibration/evaluate.js'
 import type { Label, Split } from '../calibration/labels.js'
 import type { EnvRef, ModelNeeds, PreviewData } from '../engine/plan.js'
 import type { CriterionVerdict, GraderResult, RunResult, RunStatus } from '../core/interfaces.js'
-import type { Rubric, Scenario } from '../core/scenario.js'
+import type { Anchor, Rubric, Scenario } from '../core/scenario.js'
 import type { Turn } from '../core/trace.js'
 import type { CalibrationRecord } from '../store/calibration.js'
 import type {
@@ -22,7 +22,7 @@ import type {
 import type { SuiteRecord, SuiteStatus, SuiteSummary } from '../store/suites.js'
 
 export type {
-  CalibrationReport, CalibrationRecord, CriterionVerdict, EnvRef, GraderResult, Label, LabelStats, ModelNeeds, PreviewData, QueueItem, QueueReason,
+  Anchor, CalibrationReport, CalibrationRecord, CriterionVerdict, EnvRef, GraderResult, Label, LabelStats, ModelNeeds, PreviewData, QueueItem, QueueReason,
   QueueStats, QueueToolCall, QueueTurn, Reveal, Rubric, RunResult, RunStatus, Scenario, Split, SuiteRecord, SuiteStatus, SuiteSummary, Turn,
 }
 
@@ -51,9 +51,11 @@ export type ErrorCode =
   | 'item_not_in_queue' //       422: the item exists but is not up for review (an unsampled pass)
   | 'not_labelled' //            403: reveal before the item has a human label. 404 from revise: no label to change
   | 'not_revealable' //          404: the label is not for a queue item, or its run is gone
-  | 'no_change' //               422: a revision with the same verdict and critique as the current label
+  | 'no_change' //               422: a label revision or rubric edit that changes nothing
+  | 'stale' //                   409: the rubric file changed on disk since the page read it (its hash is not baseHash). Reload
+  | 'rubric_invalid' //          422: a rubric edit that cannot be applied: criteria added, removed or renamed, a bad example, a missing version
   | 'corrupt_record' //          422: a saved file could not be read
-  | 'store_unwritable' //        500: the .evals directory could not be written
+  | 'store_unwritable' //        500: the .evals directory, or a rubric file being edited, could not be written
   | 'internal' //               500
 
 export interface ApiErrorBody {
@@ -270,6 +272,10 @@ export interface ScenariosResponse {
 export interface RubricItem {
   rubric: Rubric
   file: string
+  /** `file` relative to the working directory, for display. Absolute when the file is outside it. */
+  relativeFile: string
+  /** sha256 of the file's bytes, in hex. Send it back as `baseHash` to edit the rubric. */
+  hash: string
   /** Ids of scenarios that use it. */
   usedBy: string[]
 }
@@ -278,6 +284,57 @@ export interface RubricsResponse {
   path: string | null
   rubrics: RubricItem[]
   problems: string[]
+}
+
+/** One criterion in RubricUpdateRequest. The id must be the file's; only the other fields can change. */
+export interface CriterionEdit {
+  id: string
+  /** Must not be blank. */
+  text: string
+  /** Omit to keep the file's value. */
+  weight?: number
+  /** Omit to keep the file's value. */
+  critical?: boolean
+}
+
+/**
+ * The body of PUT /api/rubrics/:id. The server writes the file it loaded the
+ * rubric from, and nothing else.
+ */
+export interface RubricUpdateRequest {
+  /** `hash` from GET /api/rubrics. A file that changed on disk since then is refused with 409 `stale`. */
+  baseHash: string
+  /** Every criterion, with the file's ids in the file's order. Criteria cannot be added, removed, renamed or reordered here. */
+  criteria: CriterionEdit[]
+  /** The reference facts. Null or blank removes them. */
+  context: string | null
+  /** Every example, replacing the file's list. Each must name an existing criterion, or none for the rubric as a whole. */
+  anchors: Anchor[]
+  /**
+   * The new version. A whole-number version goes up by one on its own, so this
+   * is needed only when the current version is not a whole number. It must
+   * differ from the current version.
+   */
+  version?: string
+}
+
+/** How many current labels were made against a criterion whose wording just changed. */
+export interface LabelImpact {
+  criterion: string
+  labels: number
+}
+
+export interface RubricUpdateResponse {
+  /** The rubric as GET /api/rubrics now returns it. */
+  item: RubricItem
+  /** The new version. */
+  version: string
+  /** The new file's hash, for the next edit. */
+  hash: string
+  /** One entry per criterion whose text changed, with the number of current labels for it (zero included). */
+  labelImpact: LabelImpact[]
+  /** Set when the labels could not be counted, for one. The edit was saved. */
+  warnings: string[]
 }
 
 // -------------------------------------------------------- running scenarios

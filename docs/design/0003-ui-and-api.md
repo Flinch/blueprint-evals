@@ -35,8 +35,10 @@ and the appendix repeats them verbatim (a test fails if the two drift apart).
 
 - Anything remote. The server binds `127.0.0.1` and there is no option to change it.
 - Accounts, roles or multi-user editing. One person at a keyboard.
-- Editing scenarios, rubrics or the config from the page. They are files in a
+- Editing scenarios or the config from the page. They are files in a
   repository, reviewed like code. The API reads them and reports problems.
+  Rubrics are the one exception, and an edit from the page still writes the
+  rubric's file (see [Editing a rubric](#editing-a-rubric)).
 - Accepting a model key. The key comes from the server's environment.
 
 ## How the pieces fit
@@ -117,13 +119,14 @@ sensitive, so the server defends itself even though it is local.
 |---|---|
 | Another machine reaches the server | Binds `127.0.0.1` only. There is no flag to widen it |
 | Another local user, or a stray process, calls the API | A random 32-byte token, generated at startup, required on **every** request (see below) |
-| A web page in your browser calls the API (CSRF) | Token required, `SameSite=Strict` cookie, `Origin` checked, `Sec-Fetch-Site` checked, `POST` bodies must be `application/json` (which forces a preflight cross-origin), and no CORS headers are ever sent |
+| A web page in your browser calls the API (CSRF) | Token required, `SameSite=Strict` cookie, `Origin` checked, `Sec-Fetch-Site` checked, `POST` and `PUT` bodies must be `application/json` (which forces a preflight cross-origin), and no CORS headers are ever sent |
 | DNS rebinding (a hostile site re-points its name at 127.0.0.1 and reads the API) | The `Host` header must be `127.0.0.1:<port>` or `localhost:<port>`, on every request, or the answer is 403 |
 | A secret value leaks in a response | Nothing in the API is built from the environment, and every outgoing body (JSON and event stream) is scrubbed of the values of secret-looking environment variables and of any variable the config refers to with `${env:NAME}` |
 | A client supplies a model key | The API does not accept one. Bodies are strict: an unknown field (`apiKey`, `env`, `headers`) is a 400. The key is read from the server process's environment by the model provider |
 | Spending without looking | The confirmation protocol below |
 | Oversized or malformed requests | Bodies over 1 MiB are refused with 413 and the connection is dropped. Malformed JSON is a 400 |
 | Path traversal | Static files: the URL path is decoded once, any `..`, `.`, dotfile segment, NUL or backslash is refused, and the real path (symlinks followed) must stay inside `dist/ui`. API ids: a strict alphabet, and a `path` in a request body must resolve inside the workdir, the config's directory or the configured scenarios path |
+| Writing files it should not | The only file the API writes outside `.evals/` is a rubric being edited, and only the file the server loaded that rubric from. The body has no path, and the file's real path must be inside the workdir, the config's directory or the scenarios path |
 | Clickjacking, sniffing, caching | `X-Frame-Options: DENY`, a `Content-Security-Policy` that allows only this origin, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`, `Referrer-Policy: no-referrer` |
 
 ### The token
@@ -177,7 +180,8 @@ not used. A refused call makes no provider, writes no file and spends nothing.
 - Timestamps are ISO 8601 strings. Costs are US dollars, or `null` when a model
   had no price in the config. A total with any unknown part is `null`, never a
   partial sum.
-- Paths are absolute, as the server sees them.
+- Paths are absolute, as the server sees them. `RubricItem.relativeFile` is the
+  one display path, relative to the workdir.
 - Responses are never cached.
 - The server runs **one job at a time** (a run or a calibration). A second start
   while one is going is a 409 `run_in_progress`.
@@ -201,7 +205,7 @@ what a front end should switch on. `details` is present for `plan_invalid`
 | 403 | `forbidden_host` | `Host` is not this server |
 | 403 | `forbidden_origin` | A cross-origin request |
 | 403 | `not_labelled` | Reveal before the item has a label |
-| 404 | `not_found` | No such endpoint, suite or run |
+| 404 | `not_found` | No such endpoint, suite, run or rubric |
 | 404 | `not_labelled` | Revise an item that has no label yet |
 | 404 | `item_not_found` | No unlabelled queue item with that id |
 | 404 | `not_revealable` | The label is not for a queue item, or its run is gone |
@@ -211,16 +215,18 @@ what a front end should switch on. `details` is present for `plan_invalid`
 | 409 | `config_missing` | No config file was found or given |
 | 409 | `contamination` | The judge's few-shot examples include dev or test labels |
 | 409 | `duplicate_label` | The item already has a label |
+| 409 | `stale` | A rubric edit whose `baseHash` is not the file's current hash: the file changed on disk since the page read it |
 | 412 | `preview_token_invalid` | See the confirmation protocol |
 | 413 | `payload_too_large` | Body over 1 MiB |
-| 415 | `unsupported_media_type` | A `POST` body that is not `application/json` |
+| 415 | `unsupported_media_type` | A `POST` or `PUT` body that is not `application/json` |
 | 422 | `config_invalid` | The config does not validate |
 | 422 | `plan_invalid` | Scenarios or selection cannot run. `details.errors` lists them |
 | 422 | `item_not_in_queue` | The item exists but is not up for review |
-| 422 | `no_change` | A revision with the same verdict and critique as the current label |
+| 422 | `no_change` | A revision with the same verdict and critique as the current label, or a rubric edit identical to the file |
+| 422 | `rubric_invalid` | A rubric edit that cannot be applied: criteria added, removed, renamed or reordered, blank wording, a bad weight or example, a missing version, a file defined twice or outside the allowed directories |
 | 422 | `corrupt_record` | A saved file could not be read |
 | 428 | `confirmation_required` | See the confirmation protocol |
-| 500 | `store_unwritable` | `.evals/` could not be written |
+| 500 | `store_unwritable` | `.evals/`, or a rubric file being edited, could not be written |
 | 500 | `internal` | A bug. The message says what |
 | 503 | `provider_unavailable` | The model provider could not be created (a missing key, say) |
 
@@ -275,7 +281,7 @@ were not graded in that run. The two lists never share an id.
 `result` is a full `RunResult` (trace with turns, tool calls and raw responses,
 every grader result with criteria and critiques, cost, models, warnings).
 
-### Scenarios and rubrics (read-only)
+### Scenarios and rubrics
 
 **`GET /api/scenarios`** returns `ScenariosResponse` for the configured path: the
 parsed scenarios, the upper bound on model calls for each, and a
@@ -286,7 +292,52 @@ set**, never values). Files that do not parse are reported and the rest are
 still listed.
 
 **`GET /api/rubrics`** returns `RubricsResponse`: each rubric with its criteria,
-anchors and the scenarios that use it, plus problems.
+anchors and the scenarios that use it, plus problems. Each `RubricItem` also has
+`relativeFile` (the file relative to the workdir, for display) and `hash`, the
+sha256 of the file's bytes, which an edit sends back as `baseHash`. Rubrics are
+read from disk on every request, never cached, so an edit made here or in an
+editor shows at once in this list, the review queue's criterion text and the
+calibration screen.
+
+**`PUT /api/rubrics/:id`** takes `RubricUpdateRequest` and returns
+`RubricUpdateResponse`. It edits one rubric and writes the one file the server
+loaded it from. The body names no path.
+
+```ts
+interface RubricUpdateRequest {
+  baseHash: string
+  criteria: { id: string; text: string; weight?: number; critical?: boolean }[]
+  context: string | null
+  anchors: Anchor[]
+  version?: string
+}
+```
+
+- 404 `not_found` when no loaded rubric has that id. A rubric file that does not
+  validate is not loaded, so it cannot be edited here.
+- 409 `stale` when the file's sha256 is not `baseHash`. The page reloads.
+- `criteria`: the file's ids, all of them, in the file's order. Adding, removing,
+  renaming or reordering is a 422 `rubric_invalid`, because labels and runs refer
+  to criteria by id. Wording must not be blank and a weight must be above 0.
+  Omitting `weight` or `critical` keeps the file's value.
+- `anchors` replaces the list (add, edit, delete). Each is checked with the
+  loader's `AnchorSchema`, and its `criterion`, when set, must exist (422
+  `rubric_invalid`, naming the example).
+- `context`: null or blank removes the key.
+- 422 `no_change` when nothing differs from the file.
+- **The version goes up on every save.** A whole-number version (`2` or `"2"`)
+  goes up by one, keeping its quoting. Any other version (`v2`, `1.5`) needs
+  `version` in the body, different from the current one, or the answer is 422
+  `rubric_invalid` saying so. `version`, when given, is used as it is.
+- The edited file is read back with the loader's own schema (the same validation
+  as `evals validate`) and compared with what was asked for before anything is
+  written. The write is atomic: a temporary file in the same directory, then a
+  rename.
+- The response has the rubric as `GET /api/rubrics` now returns it, its new
+  `hash` and `version`, and `labelImpact`: for each criterion whose wording
+  changed, how many current labels (the end of each revision chain, as
+  calibration uses) are about it. A label file that cannot be read does not stop
+  the save. The response then says so in `warnings`.
 
 ### Running scenarios
 
@@ -577,6 +628,54 @@ and a deep link to one just falls back to the first item. `sampled_by` is decide
 from the whole plan (`findQueueItem` runs the plan with no page limit), so how many
 items the page loaded, and which one the person chose first, does not change it.
 
+## Editing a rubric
+
+**Why.** Calibration and the reveal in Classify show where the judge and the
+person disagree. Some disagreements are the judge misreading the rubric. Others
+are the judge following the rubric faithfully where the rubric says something the
+person does not agree with (a criterion that fails a refusal the person would
+pass, say, and a worked example that teaches the same). The fix for the second
+kind is in the rubric, and making it should not mean leaving the page to find
+the file. The links from Classify and Calibration go straight to the criterion,
+and the Rubrics tab can change it. This closes the loop from a disagreement to
+the rule.
+
+**The file stays the source of truth.** An edit writes the rubric's own YAML file
+and nothing else, so it shows up in `git diff` and is reviewed like any other
+change. There is no second copy and no database. The server changes only the
+text that was edited: it finds each node with the `yaml` Document API and
+replaces those spans of the file, keeping everything else byte for byte,
+comments included. (Printing the whole parsed document again would keep comments
+but re-wrap every folded block in the file, which would bury a one-line change in
+dozens of unrelated ones.) An edited folded paragraph keeps its own line breaks
+where the words did not change.
+
+**What can change.** The wording, weight and critical flag of each criterion, the
+reference facts (`context`), and the worked examples (`anchors`), which can be
+added, edited and deleted. Criterion ids are fixed, along with how many there are
+and their order: labels, runs and calibrations refer to criteria by id, so a
+rename would orphan them. To change the set, edit the file in an editor.
+
+**Versions bump on every save**, so past runs and calibrations, which record the
+rubric version they used, keep showing it. A version that is not a whole number
+asks for the new one.
+
+**Labels made against the old wording.** Labels are about a criterion id, not its
+wording. The save confirmation, and the response, say how many current labels
+exist for each criterion whose wording changed: "3 labels were made against the
+old wording of protects-other-patients. If the meaning changed, review them in
+Classify." It is information. Nothing is relabelled or hidden.
+
+**On the page.** Each rubric on the Rubrics tab has an Edit button. Edit mode has
+a text area for each criterion's wording, a weight, a critical checkbox, a text
+area for the reference facts, and the worked examples with Edit, Delete and Add
+example (criterion or "Whole rubric", input, output, verdict, critique). Save
+opens a confirmation that lists what changed, says which version the save makes
+("Saving makes this version 3. Past runs and calibrations keep showing the
+version they used."), and gives the label counts. Confirm writes, Back to editing
+returns to the form. A 409 `stale` (the file was edited on disk meanwhile) shows a
+message and a button to reload the file.
+
 ## What the front end needs to do
 
 These follow from the above. They are the parts that are easy to get wrong.
@@ -625,7 +724,7 @@ runtime dependencies are unchanged.
 | `#/launch` | Choose scenarios and a cap, preview, confirm, then live progress from the event stream and cancel |
 | `#/classify`, `#/classify?item=<itemId>`, `#/classify/labels` | Blind review queue (with a picker, and a deep link to one item), and the label list |
 | `#/calibration` | Choose rubric, split and selection, preview, confirm, then the report with the true negative rate first |
-| `#/scenarios` | Read-only scenarios, rubrics and validation problems |
+| `#/scenarios`, `#/scenarios?tab=rubrics&rubric=<id>&criterion=<id>` | Scenarios (read-only), rubrics with an Edit button, and validation problems. The deep link opens the Rubrics tab and highlights that criterion and its worked examples |
 
 Choices worth knowing:
 
@@ -653,6 +752,10 @@ Choices worth knowing:
   what was changed. The label list offers the same action on each label and
   marks changed labels "Revised". Nothing about the judge appears before the
   first label is saved, and only a labelled item can be changed.
+- **Editing a rubric.** See [Editing a rubric](#editing-a-rubric). Classify (next
+  to the criterion, before and after the reveal) and the disagreements in a
+  calibration report link to the criterion with "View or edit this criterion".
+  From Classify the link opens a new tab, so an unsaved label stays put.
 - **Confirmation.** The page never calls `POST /api/run/start` or
   `POST /api/calibrate/start` without a preview of the same request and a click in a
   dialog that states the scope and the number of model calls. A changed selection or
@@ -690,8 +793,10 @@ and the stub agent, never a real model. It covers the token, Host and Origin
 checks, path traversal, the preview-token refusals (including a tampered plan, an
 edited config and a changed label set), a streamed deterministic run and its saved
 suite, one run at a time, cancel, the blind queue, the quota and its stability,
-label validation, calibration through the API, corrupt files, and that no response
-contains a secret value from the environment.
+label validation, calibration through the API, corrupt files, rubric edits (on
+temporary copies of the example rubrics: comments kept, version bumps, stale,
+refused edits, label counts, and the change showing in the rubric list and the
+queue), and that no response contains a secret value from the environment.
 
 ## Open questions
 
@@ -710,8 +815,10 @@ contains a secret value from the environment.
 4. **Overview scale.** It reads the newest 100 suites in full on each call (headers
    are cached). A larger store wants a persisted digest per suite.
 5. **A label's criterion text.** It is read from the scenario's rubric as it is now,
-   so editing a rubric changes what a labeller is shown for old runs. Pinning the
-   rubric version in the suite record would fix that.
+   so editing a rubric changes what a labeller is shown for old runs. A save from
+   the page says how many labels were made against the old wording, but they are
+   not marked. Pinning the rubric version in the suite record, and on each label,
+   would fix that.
 6. **Stored traces are not scrubbed**, only responses. Scrubbing at save time would
    also protect the file, at the cost of altering recorded transcripts.
 
@@ -736,7 +843,7 @@ import type { CalibrationReport } from '../calibration/evaluate.js'
 import type { Label, Split } from '../calibration/labels.js'
 import type { EnvRef, ModelNeeds, PreviewData } from '../engine/plan.js'
 import type { CriterionVerdict, GraderResult, RunResult, RunStatus } from '../core/interfaces.js'
-import type { Rubric, Scenario } from '../core/scenario.js'
+import type { Anchor, Rubric, Scenario } from '../core/scenario.js'
 import type { Turn } from '../core/trace.js'
 import type { CalibrationRecord } from '../store/calibration.js'
 import type {
@@ -745,7 +852,7 @@ import type {
 import type { SuiteRecord, SuiteStatus, SuiteSummary } from '../store/suites.js'
 
 export type {
-  CalibrationReport, CalibrationRecord, CriterionVerdict, EnvRef, GraderResult, Label, LabelStats, ModelNeeds, PreviewData, QueueItem, QueueReason,
+  Anchor, CalibrationReport, CalibrationRecord, CriterionVerdict, EnvRef, GraderResult, Label, LabelStats, ModelNeeds, PreviewData, QueueItem, QueueReason,
   QueueStats, QueueToolCall, QueueTurn, Reveal, Rubric, RunResult, RunStatus, Scenario, Split, SuiteRecord, SuiteStatus, SuiteSummary, Turn,
 }
 
@@ -774,9 +881,11 @@ export type ErrorCode =
   | 'item_not_in_queue' //       422: the item exists but is not up for review (an unsampled pass)
   | 'not_labelled' //            403: reveal before the item has a human label. 404 from revise: no label to change
   | 'not_revealable' //          404: the label is not for a queue item, or its run is gone
-  | 'no_change' //               422: a revision with the same verdict and critique as the current label
+  | 'no_change' //               422: a label revision or rubric edit that changes nothing
+  | 'stale' //                   409: the rubric file changed on disk since the page read it (its hash is not baseHash). Reload
+  | 'rubric_invalid' //          422: a rubric edit that cannot be applied: criteria added, removed or renamed, a bad example, a missing version
   | 'corrupt_record' //          422: a saved file could not be read
-  | 'store_unwritable' //        500: the .evals directory could not be written
+  | 'store_unwritable' //        500: the .evals directory, or a rubric file being edited, could not be written
   | 'internal' //               500
 
 export interface ApiErrorBody {
@@ -993,6 +1102,10 @@ export interface ScenariosResponse {
 export interface RubricItem {
   rubric: Rubric
   file: string
+  /** `file` relative to the working directory, for display. Absolute when the file is outside it. */
+  relativeFile: string
+  /** sha256 of the file's bytes, in hex. Send it back as `baseHash` to edit the rubric. */
+  hash: string
   /** Ids of scenarios that use it. */
   usedBy: string[]
 }
@@ -1001,6 +1114,57 @@ export interface RubricsResponse {
   path: string | null
   rubrics: RubricItem[]
   problems: string[]
+}
+
+/** One criterion in RubricUpdateRequest. The id must be the file's; only the other fields can change. */
+export interface CriterionEdit {
+  id: string
+  /** Must not be blank. */
+  text: string
+  /** Omit to keep the file's value. */
+  weight?: number
+  /** Omit to keep the file's value. */
+  critical?: boolean
+}
+
+/**
+ * The body of PUT /api/rubrics/:id. The server writes the file it loaded the
+ * rubric from, and nothing else.
+ */
+export interface RubricUpdateRequest {
+  /** `hash` from GET /api/rubrics. A file that changed on disk since then is refused with 409 `stale`. */
+  baseHash: string
+  /** Every criterion, with the file's ids in the file's order. Criteria cannot be added, removed, renamed or reordered here. */
+  criteria: CriterionEdit[]
+  /** The reference facts. Null or blank removes them. */
+  context: string | null
+  /** Every example, replacing the file's list. Each must name an existing criterion, or none for the rubric as a whole. */
+  anchors: Anchor[]
+  /**
+   * The new version. A whole-number version goes up by one on its own, so this
+   * is needed only when the current version is not a whole number. It must
+   * differ from the current version.
+   */
+  version?: string
+}
+
+/** How many current labels were made against a criterion whose wording just changed. */
+export interface LabelImpact {
+  criterion: string
+  labels: number
+}
+
+export interface RubricUpdateResponse {
+  /** The rubric as GET /api/rubrics now returns it. */
+  item: RubricItem
+  /** The new version. */
+  version: string
+  /** The new file's hash, for the next edit. */
+  hash: string
+  /** One entry per criterion whose text changed, with the number of current labels for it (zero included). */
+  labelImpact: LabelImpact[]
+  /** Set when the labels could not be counted, for one. The edit was saved. */
+  warnings: string[]
 }
 
 // -------------------------------------------------------- running scenarios

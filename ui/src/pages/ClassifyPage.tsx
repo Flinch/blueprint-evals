@@ -5,7 +5,7 @@ import { useAsync } from '../api/useAsync'
 import { TurnView } from './RunDetailPage'
 import { Banner, CriticalMarker, EmptyState, ErrorState, Loading, PageHead, Tabs, VerdictBadge, Warnings } from '../components/ui'
 import { percent, plural, shortDate } from '../lib/format'
-import { runHref } from '../lib/router'
+import { criterionHref, runHref } from '../lib/router'
 import { readStored, writeStored } from '../lib/storage'
 
 // Blind labelling. The queue item has the input, the output being judged and the
@@ -220,6 +220,20 @@ function ItemPicker({
 
 const verdictWord = (v: 'pass' | 'fail') => (v === 'pass' ? 'Pass' : 'Fail')
 
+/**
+ * Opens the criterion on the Scenarios page, where the rubric can be edited. The
+ * rubric's text is the question, never the judge's answer, so showing the link
+ * before the label is saved keeps the labelling blind. A new tab keeps an
+ * unsaved label in this one.
+ */
+export function CriterionLink({ criterion, rubricId }: { criterion: string; rubricId?: string | null }) {
+  return (
+    <a className="small" href={criterionHref(criterion, rubricId)} target="_blank" rel="noopener noreferrer" title="Opens in a new tab">
+      View or edit this criterion
+    </a>
+  )
+}
+
 /** One sentence about a label that was changed after the first save, or null when it never was. */
 export function revisionNote(reveal: Pick<RevealResponse, 'original' | 'human' | 'revisions'>): string | null {
   const { original, human } = reveal
@@ -229,7 +243,7 @@ export function revisionNote(reveal: Pick<RevealResponse, 'original' | 'human' |
     : `You changed your critique after seeing the judge. The verdict is still ${verdictWord(human.verdict)}.`
 }
 
-export function RevealView({ reveal }: { reveal: RevealResponse }) {
+export function RevealView({ reveal, criterion }: { reveal: RevealResponse; criterion?: { id: string; rubricId?: string | null } }) {
   const { judge, human } = reveal
   const note = revisionNote(reveal)
   return (
@@ -277,7 +291,12 @@ export function RevealView({ reveal }: { reveal: RevealResponse }) {
           <p className="small muted" style={{ marginTop: '0.5rem', whiteSpace: 'normal' }} role="status">{note}</p>
         </div>
       ) : null}
-      {reveal.runId ? <a href={runHref(reveal.runId)} className="small">Open the whole run</a> : null}
+      {reveal.runId || criterion ? (
+        <div className="row">
+          {reveal.runId ? <a href={runHref(reveal.runId)} className="small">Open the whole run</a> : null}
+          {criterion ? <CriterionLink criterion={criterion.id} rubricId={criterion.rubricId} /> : null}
+        </div>
+      ) : null}
     </div>
   )
 }
@@ -388,6 +407,9 @@ export function ReviseForm({
 export function QueueView({ itemId }: { itemId?: string } = {}) {
   const queue = useAsync(() => api.queue(QUEUE_LIMIT), [])
   const labels = useAsync(() => api.labels(), [])
+  // Only to link a criterion to its rubric. A failure leaves the link without a rubric id, and the Scenarios page finds it.
+  const rubrics = useAsync(() => api.rubrics(), [])
+  const rubricOf = (scenarioId: string) => rubrics.data?.rubrics.find(r => r.usedBy.includes(scenarioId))?.rubric.id
   const [items, setItems] = useState<QueueItem[]>([])
   const [stats, setStats] = useState<QueueStats | null>(null)
   const [labelStats, setLabelStats] = useState<LabelStats | null>(null)
@@ -659,6 +681,7 @@ export function QueueView({ itemId }: { itemId?: string } = {}) {
                 <span className="mono">{current.criterion.id}</span>
                 {current.criterion.critical ? <CriticalMarker /> : null}
                 <span>scenario {current.scenarioId}</span>
+                <CriterionLink criterion={current.criterion.id} rubricId={rubricOf(current.scenarioId)} />
               </div>
             </div>
             <div className="review-section">
@@ -757,7 +780,7 @@ export function QueueView({ itemId }: { itemId?: string } = {}) {
                 {problem ? <Banner kind="danger" role="alert">{problem}</Banner> : null}
                 {reveal ? (
                   <>
-                    <RevealView reveal={reveal} />
+                    <RevealView reveal={reveal} criterion={{ id: current.criterion.id, rubricId: rubricOf(current.scenarioId) }} />
                     {phase === 'revising' && saved ? (
                       <ReviseForm itemId={current.itemId} current={saved} idPrefix="revise-current" onSaved={onRevised} onCancel={() => setPhase('revealed')} />
                     ) : (
@@ -951,7 +974,7 @@ export function LabelsView() {
                                   </div>
                                 ) : (
                                   <>
-                                    {typeof rv === 'string' ? <Banner kind="info">{rv}</Banner> : <RevealView reveal={rv} />}
+                                    {typeof rv === 'string' ? <Banner kind="info">{rv}</Banner> : <RevealView reveal={rv} criterion={{ id: l.criterion }} />}
                                     {revising === itemId ? null : <div><button type="button" className="btn btn-ghost btn-sm" onClick={() => setRevising(itemId)}>Change label</button></div>}
                                   </>
                                 )}

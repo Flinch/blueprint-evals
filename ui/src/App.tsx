@@ -111,7 +111,7 @@ function Shell({ health, theme, onTheme }: { health: HealthResponse; theme: Them
     if (p === '/classify') return <ClassifyPage tab="queue" itemId={loc.query.get('item') ?? undefined} onTab={t => loc.navigate(t === 'labels' ? '/classify/labels' : '/classify')} />
     if (p === '/classify/labels') return <ClassifyPage tab="labels" onTab={t => loc.navigate(t === 'labels' ? '/classify/labels' : '/classify')} />
     if (p === '/calibration') return <CalibrationPage />
-    if (p === '/scenarios') return <ScenariosPage />
+    if (p === '/scenarios') return <ScenariosPage link={{ tab: loc.query.get('tab'), rubric: loc.query.get('rubric'), criterion: loc.query.get('criterion') }} />
     return (
       <div className="card">
         <div className="empty-state">

@@ -123,6 +123,54 @@ describe('server security', () => {
     })
   })
 
+  // The fixture serves the example scenarios, so no request here may get as far as writing:
+  // each is refused before the body is read, or carries a body that fails validation.
+  describe('PUT /api/rubrics/:id (the one call that writes a repository file)', () => {
+    const put = (headers: Record<string, string>, body = '{}') =>
+      raw(f.ui, '/api/rubrics/scheduling', { method: 'PUT', headers: { 'content-type': 'application/json', ...headers }, body })
+
+    it('needs the token', async () => {
+      expect((await put({})).status).toBe(401)
+      expect((await put({ authorization: 'Bearer nope' })).status).toBe(401)
+      expect((await raw(f.ui, `/api/rubrics/scheduling?token=${f.ui.token}`, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: '{}' })).status).toBe(401)
+    })
+
+    it('refuses another origin and a request the browser marks cross-site, before reading the body', async () => {
+      const refused: Record<string, string>[] = [{ origin: 'https://evil.example' }, { origin: 'null' }, { 'sec-fetch-site': 'cross-site' }, { 'sec-fetch-site': 'same-site' }]
+      for (const headers of refused) {
+        const r = await put({ ...auth(), ...headers })
+        expect(r.status, JSON.stringify(headers)).toBe(403)
+        expect(r.json().error.code).toBe('forbidden_origin')
+      }
+      expect((await put({ ...auth(), host: 'evil.example' })).status).toBe(403)
+    })
+
+    it('reaches validation from this server\'s own origin (and writes nothing for an invalid body)', async () => {
+      const r = await put({ ...auth(), origin: `http://127.0.0.1:${port()}`, 'sec-fetch-site': 'same-origin' })
+      expect(r.status).toBe(400)
+      expect(r.json().error.code).toBe('bad_request')
+    })
+
+    it('requires application/json, caps the body and rejects fields it does not know', async () => {
+      expect((await put({ ...auth(), 'content-type': 'text/plain' })).status).toBe(415)
+      const small = await fixture({ server: { maxBodyBytes: 500 } })
+      try {
+        const big = await raw(small.ui, '/api/rubrics/scheduling', {
+          method: 'PUT',
+          headers: { authorization: `Bearer ${small.ui.token}`, 'content-type': 'application/json' },
+          body: JSON.stringify({ context: 'x'.repeat(2000) }),
+        })
+        expect(big.status).toBe(413)
+        expect(big.json().error.code).toBe('payload_too_large')
+      } finally {
+        await small.stop()
+      }
+      const file = await put(auth(), JSON.stringify({ baseHash: '0'.repeat(64), criteria: [], context: null, anchors: [], file: '/etc/passwd' }))
+      expect(file.status).toBe(400)
+      expect(file.text).toMatch(/file/)
+    })
+  })
+
   describe('request handling', () => {
     it('requires application/json on a POST', async () => {
       const r = await raw(f.ui, '/api/run/preview', { method: 'POST', headers: { ...auth(), 'content-type': 'text/plain' }, body: '{}' })

@@ -1,7 +1,7 @@
 import type {
   ApiErrorBody, CalibratePreviewResponse, CalibrateRequest, CalibrateStartRequest, CalibrateStartResponse, CalibrationResponse, ErrorCode,
   HealthResponse, LabelRequest, LabelResponse, LabelsResponse, OverviewResponse, QueueResponse, RevealResponse, ReviseRequest, RubricsResponse,
-  RunCancelResponse, RunPreviewResponse, RunRequest, RunResponse, RunsResponse, RunStartRequest, RunStartResponse, RunStatusResponse,
+  RubricUpdateRequest, RubricUpdateResponse, RunCancelResponse, RunPreviewResponse, RunRequest, RunResponse, RunsResponse, RunStartRequest, RunStartResponse, RunStatusResponse,
   ScenariosResponse, SuiteResponse, SuitesResponse,
 } from '../../../src/ui/api-types'
 
@@ -31,7 +31,7 @@ function isErrorBody(x: unknown): x is ApiErrorBody {
   return typeof x === 'object' && x !== null && typeof (x as ApiErrorBody).error === 'object' && (x as ApiErrorBody).error !== null
 }
 
-async function request<T>(method: 'GET' | 'POST', path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+async function request<T>(method: 'GET' | 'POST' | 'PUT', path: string, body?: unknown, signal?: AbortSignal): Promise<T> {
   let res: Response
   try {
     res = await fetch(path, {
@@ -65,6 +65,7 @@ async function request<T>(method: 'GET' | 'POST', path: string, body?: unknown, 
 
 const get = <T>(path: string, signal?: AbortSignal) => request<T>('GET', path, undefined, signal)
 const post = <T>(path: string, body: unknown = {}) => request<T>('POST', path, body)
+const put = <T>(path: string, body: unknown) => request<T>('PUT', path, body)
 
 function qs(params: Record<string, string | number | undefined | null>): string {
   const q = new URLSearchParams()
@@ -91,6 +92,7 @@ export const api = {
   run: (runId: string) => get<RunResponse>(`/api/runs/${encodeURIComponent(runId)}`),
   scenarios: () => get<ScenariosResponse>('/api/scenarios'),
   rubrics: () => get<RubricsResponse>('/api/rubrics'),
+  updateRubric: (id: string, body: RubricUpdateRequest) => put<RubricUpdateResponse>(`/api/rubrics/${encodeURIComponent(id)}`, body),
   runPreview: (body: RunRequest) => post<RunPreviewResponse>('/api/run/preview', body),
   runStart: (body: RunStartRequest) => post<RunStartResponse>('/api/run/start', body),
   runStatus: () => get<RunStatusResponse>('/api/run/status'),

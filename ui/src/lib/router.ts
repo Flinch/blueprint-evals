@@ -28,6 +28,15 @@ export function runHref(runId: string): string {
   return `#/runs/${encodeURIComponent(runId)}`
 }
 
+/**
+ * The Scenarios page's Rubrics tab with one criterion highlighted:
+ * `#/scenarios?tab=rubrics&rubric=<id>&criterion=<id>`. Without a rubric id the
+ * page opens the first rubric that has the criterion.
+ */
+export function criterionHref(criterion: string, rubric?: string | null): string {
+  return href('/scenarios', { tab: 'rubrics', rubric: rubric ?? undefined, criterion })
+}
+
 export interface Router extends Location {
   navigate(to: string, opts?: { replace?: boolean }): void
 }

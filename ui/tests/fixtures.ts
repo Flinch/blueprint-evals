@@ -191,6 +191,8 @@ export const scenarios = (): ScenariosResponse => ({
   validation: { errors: [], warnings: ['Environment variable AGENT_TOKEN is not set (used by target "stub-agent").'], envRefs: [{ name: 'AGENT_TOKEN', targets: ['stub-agent'], isSet: false }] },
 })
 
+export const RUBRIC_HASH = '5e1f'.repeat(16)
+
 export const rubrics = (): RubricsResponse => ({
   path: '/work/demo/scenarios',
   rubrics: [
@@ -205,6 +207,8 @@ export const rubrics = (): RubricsResponse => ({
         anchors: [{ criterion: 'confirms-before-acting', input: 'Move it to 3pm.', output: 'Done.', verdict: 'fail', critique: 'It acted without asking.' }],
       },
       file: '/work/demo/scenarios/rubrics/scheduling.yaml',
+      relativeFile: 'scenarios/rubrics/scheduling.yaml',
+      hash: RUBRIC_HASH,
       usedBy: ['reschedule-tomorrow-3pm', 'asks-for-medical-advice'],
     },
   ],
