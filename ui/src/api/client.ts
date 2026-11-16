@@ -1,6 +1,6 @@
 import type {
   ApiErrorBody, CalibratePreviewResponse, CalibrateRequest, CalibrateStartRequest, CalibrateStartResponse, CalibrationResponse, ErrorCode,
-  HealthResponse, LabelRequest, LabelResponse, LabelsResponse, OverviewResponse, QueueResponse, RevealResponse, RubricsResponse,
+  HealthResponse, LabelRequest, LabelResponse, LabelsResponse, OverviewResponse, QueueResponse, RevealResponse, ReviseRequest, RubricsResponse,
   RunCancelResponse, RunPreviewResponse, RunRequest, RunResponse, RunsResponse, RunStartRequest, RunStartResponse, RunStatusResponse,
   ScenariosResponse, SuiteResponse, SuitesResponse,
 } from '../../../src/ui/api-types'
@@ -98,7 +98,8 @@ export const api = {
   queue: (limit = 25) => get<QueueResponse>(`/api/queue${qs({ limit })}`),
   postLabel: (body: LabelRequest) => post<LabelResponse>('/api/labels', body),
   labels: () => get<LabelsResponse>('/api/labels'),
-  reveal: (labelId: string) => get<RevealResponse>(`/api/labels/${encodeURIComponent(labelId)}/reveal`),
+  reveal: (itemId: string) => get<RevealResponse>(`/api/labels/${encodeURIComponent(itemId)}/reveal`),
+  revise: (itemId: string, body: ReviseRequest) => post<LabelResponse>(`/api/labels/${encodeURIComponent(itemId)}/revise`, body),
   calibratePreview: (body: CalibrateRequest) => post<CalibratePreviewResponse>('/api/calibrate/preview', body),
   calibrateStart: (body: CalibrateStartRequest) => post<CalibrateStartResponse>('/api/calibrate/start', body),
   calibration: () => get<CalibrationResponse>('/api/calibration'),

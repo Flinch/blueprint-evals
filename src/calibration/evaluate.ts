@@ -3,7 +3,7 @@ import type { ModelProvider } from '../core/interfaces.js'
 import { ScenarioSchema, type Anchor, type Rubric } from '../core/scenario.js'
 import { addUsage, ZERO_USAGE, type Effort, type Trace, type Turn, type Usage } from '../core/trace.js'
 import { FRAMEWORK_VERSION } from '../core/version.js'
-import { checkLabels, contentKey, splitOf, type Label, type Split } from './labels.js'
+import { checkLabels, contentKey, itemIdOfLabel, resolveLabels, splitOf, type Label, type Split } from './labels.js'
 import { computeMetrics, type Metrics, type Verdict } from './metrics.js'
 
 // Measures a judge against expert labels. The judge declares the few-shot
@@ -44,13 +44,31 @@ export interface EvaluateOptions {
 }
 
 export interface EvaluatedItem {
+  /** The item id. For a changed label this is the item, not the revision line's id. */
   id: string
   criterion: string
+  /** The expert's current verdict. */
   expert: Verdict
   judge: Verdict
   agree: boolean
   expertCritique: string
   judgeCritique?: string
+  /** Set only when the label was changed after it was first saved: the expert's original, blind verdict. */
+  blindExpert?: Verdict
+}
+
+/**
+ * Labels changed after the judge's answer was available, and the rates
+ * recomputed against the original, blind verdicts with the same judge answers.
+ * A revision may drift toward the judge, so both are reported.
+ */
+export interface RevisionSummary {
+  /** Labels in the selection whose verdict or critique was changed after the first save. */
+  revised: number
+  /** Of those, how many changed the verdict. */
+  verdictChanged: number
+  /** The same judged items scored against the blind verdicts. Null when nothing in the selection was revised. */
+  blindMetrics: Metrics | null
 }
 
 export interface CalibrationReport {
@@ -67,6 +85,8 @@ export interface CalibrationReport {
   disagreements: EvaluatedItem[]
   /** Items the judge could not judge. Kept out of the metrics, never silently dropped. */
   errors: { id: string; reason: string }[]
+  /** Labels changed after the first save, and the rates on the blind labels. Absent from reports saved before revisions existed. */
+  revisions?: RevisionSummary
   /** Spend on the judge calls. null if any price was unknown. */
   usage: Usage
   warnings: string[]
@@ -80,16 +100,31 @@ export interface CalibrationReport {
  */
 export function contaminationProblem(labels: Label[], anchors: Anchor[]): string | null {
   const anchorKeys = new Set(anchors.map(contentKey))
-  const contaminated = labels.filter(l => splitOf(l) !== 'train' && anchorKeys.has(contentKey(l)))
+  // A revision has its original's content and split, so an item is named once whichever lines are passed.
+  const seen = new Set<string>()
+  const contaminated = labels.filter(l => {
+    const item = itemIdOfLabel(l)
+    if (seen.has(item) || splitOf(l) === 'train' || !anchorKeys.has(contentKey(l))) return false
+    seen.add(item)
+    return true
+  })
   if (contaminated.length === 0) return null
   return `The judge's few-shot examples include labels from the dev or test split, so it would be graded on examples it was shown: ${contaminated.map(l => `${l.id} (${splitOf(l)})`).join(', ')}. Build examples from train labels only.`
 }
 
-export async function evaluateJudge(labels: Label[], judge: LabelJudge, options: EvaluateOptions): Promise<CalibrationReport> {
+/**
+ * Takes every line of a label file. Revisions are resolved first: the judge is
+ * measured against each item's current label, and the same judge answers are
+ * also scored against the blind labels (`revisions`), with no extra calls.
+ * Throws LabelChainError for a broken replace chain.
+ */
+export async function evaluateJudge(all: Label[], judge: LabelJudge, options: EvaluateOptions): Promise<CalibrationReport> {
   const selection = options.selection ?? 'random'
   if ((options.split as string) === 'train') {
     throw new ContaminationError('Cannot evaluate on the train split: those labels may appear in the judge prompt.')
   }
+  const { current: labels, history } = resolveLabels(all)
+  const blindOf = (l: Label) => history.get(itemIdOfLabel(l))?.[0]
 
   const contamination = contaminationProblem(labels, judge.anchors)
   if (contamination) throw new ContaminationError(contamination)
@@ -105,23 +140,31 @@ export async function evaluateJudge(labels: Label[], judge: LabelJudge, options:
     try {
       const j = await judge.judge(label)
       if (j.usage) usage = addUsage(usage, j.usage)
+      const blind = blindOf(label)
       items.push({
-        id: label.id,
+        id: itemIdOfLabel(label),
         criterion: label.criterion,
         expert: label.verdict,
         judge: j.verdict,
         agree: j.verdict === label.verdict,
         expertCritique: label.critique,
         ...(j.critique !== undefined ? { judgeCritique: j.critique } : {}),
+        ...(blind ? { blindExpert: blind.verdict } : {}),
       })
     } catch (e) {
-      errors.push({ id: label.id, reason: e instanceof Error ? e.message : String(e) })
+      errors.push({ id: itemIdOfLabel(label), reason: e instanceof Error ? e.message : String(e) })
     }
   }
 
   const metrics = computeMetrics(items.map(i => ({ expert: i.expert, judge: i.judge })))
+  const revisedInSelection = eligible.filter(l => blindOf(l) !== undefined)
+  const revisions: RevisionSummary = {
+    revised: revisedInSelection.length,
+    verdictChanged: revisedInSelection.filter(l => blindOf(l)!.verdict !== l.verdict).length,
+    blindMetrics: revisedInSelection.length === 0 ? null : computeMetrics(items.map(i => ({ expert: i.blindExpert ?? i.expert, judge: i.judge }))),
+  }
 
-  const warnings = [...checkLabels(labels)]
+  const warnings = [...checkLabels(all)]
   if (inSplit.length === 0) warnings.push(`There are no labels in the ${options.split} split.`)
   else if (eligible.length === 0) warnings.push(`None of the ${inSplit.length} ${options.split} labels were randomly sampled, so nothing could be measured.`)
   if (excludedTargeted > 0) {
@@ -132,6 +175,9 @@ export async function evaluateJudge(labels: Label[], judge: LabelJudge, options:
   }
   if (errors.length > 0) {
     warnings.push(`${errors.length} of ${eligible.length} items could not be judged and are not in the rates. Fix the cause before trusting them.`)
+  }
+  if (revisions.revised > 0) {
+    warnings.push(`${revisions.revised} of the measured labels were changed after the judge's answer was available. The rates use the changed labels; the rates on the original, blind labels are reported next to them.`)
   }
   warnings.push(...metrics.warnings)
 
@@ -145,6 +191,7 @@ export async function evaluateJudge(labels: Label[], judge: LabelJudge, options:
     items,
     disagreements: items.filter(i => !i.agree),
     errors,
+    revisions,
     usage,
     warnings,
   }
@@ -233,6 +280,15 @@ export function formatReport(report: CalibrationReport): string {
     `Cohen's kappa: ${m.kappa === null ? 'n/a' : m.kappa.toFixed(2)}`,
     m.insufficient ? 'Status: INSUFFICIENT SAMPLE, do not rely on these numbers.' : 'Status: sample size adequate',
   ]
+  const rv = report.revisions
+  if (rv && rv.revised > 0 && rv.blindMetrics) {
+    const b = rv.blindMetrics
+    lines.push(
+      '',
+      `Changed after seeing the judge: ${rv.revised} of these labels (${rv.verdictChanged} changed the verdict).`,
+      `On the original, blind labels: accuracy ${pct(b.accuracy)}, true negative rate ${pct(b.tnr.rate)}, true positive rate ${pct(b.tpr.rate)}.`,
+    )
+  }
   if (report.warnings.length > 0) lines.push('', 'Warnings:', ...report.warnings.map(w => `  - ${w}`))
   if (report.errors.length > 0) lines.push('', 'Could not be judged:', ...report.errors.map(e => `  - ${e.id}: ${e.reason}`))
   if (report.disagreements.length > 0) {

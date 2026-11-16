@@ -8,6 +8,7 @@ import { JUDGE_CRITIQUE, queue, queueItem, reveal } from './fixtures'
 beforeEach(() => installEventSource())
 
 const REVEAL_ROUTE = 'GET /api/labels/run-fail-1%3Aconfirms-before-acting/reveal'
+const REVISE_ROUTE = 'POST /api/labels/run-fail-1%3Aconfirms-before-acting/revise'
 
 function savedLabel(over: Partial<Label> = {}): Label {
   return {
@@ -116,6 +117,117 @@ describe('blind labelling: nothing about the judge before the label is saved', (
     await user.click(await screen.findByRole('button', { name: 'Reveal what the judge said' }))
     expect(await screen.findByText('The judge never decided this criterion.')).toBeInTheDocument()
     expect(screen.getByText(/Judge call failed: timeout/)).toBeInTheDocument()
+  })
+})
+
+describe('changing a label after the reveal', () => {
+  const revisedLabel = savedLabel({ id: 'run-fail-1:confirms-before-acting~r1', replaces: 'run-fail-1:confirms-before-acting', verdict: 'pass', critique: 'It did ask in [1].', at: '2026-11-12T11:05:00.000Z' })
+  const revisedReveal = reveal({
+    labelId: revisedLabel.id,
+    human: { verdict: 'pass', critique: 'It did ask in [1].', labeler: 'Sam', at: revisedLabel.at },
+    agrees: false,
+    original: { verdict: 'fail', critique: 'It cancelled at once.', at: '2026-11-12T11:00:00.000Z' },
+    revisions: 1,
+    blindAgrees: true,
+  })
+  function flowRoutes() {
+    let revised = false
+    return routes({
+      [REVEAL_ROUTE]: () => ({ body: revised ? revisedReveal : reveal() }),
+      [REVISE_ROUTE]: () => {
+        revised = true
+        return { status: 201, body: { label: revisedLabel } }
+      },
+    })
+  }
+  async function saveAndReveal(user: ReturnType<typeof userEvent.setup>) {
+    await screen.findByLabelText('Item to label')
+    await user.click(screen.getByRole('button', { name: /^Fail/ }))
+    await user.type(screen.getByLabelText('Critique (required)'), 'It cancelled at once.')
+    await user.type(screen.getByLabelText('Your name'), 'Sam')
+    await user.click(screen.getByRole('button', { name: 'Save label' }))
+    await screen.findByText('Label saved.')
+  }
+
+  it('is offered only after the label is saved and the judge revealed', async () => {
+    const user = userEvent.setup()
+    const fake = installFetch(flowRoutes())
+    renderApp('/classify')
+    await screen.findByLabelText('Item to label')
+    expect(screen.queryByRole('button', { name: /Change my label/ })).toBeNull()
+    await saveAndReveal(user)
+    // Saved, not revealed: still no change button, and E does nothing.
+    expect(screen.queryByRole('button', { name: /Change my label/ })).toBeNull()
+    await user.keyboard('e')
+    expect(screen.queryByLabelText('Change the label')).toBeNull()
+    expect(fake.to(REVISE_ROUTE)).toHaveLength(0)
+    await user.click(screen.getByRole('button', { name: 'Reveal what the judge said' }))
+    expect(await screen.findByRole('button', { name: 'Change my label (E)' })).toBeInTheDocument()
+  })
+
+  it('opens a pre-filled form, saves the change, and shows what changed', async () => {
+    const user = userEvent.setup()
+    const fake = installFetch(flowRoutes())
+    renderApp('/classify')
+    await saveAndReveal(user)
+    await user.click(screen.getByRole('button', { name: 'Reveal what the judge said' }))
+    await screen.findByText(JUDGE_CRITIQUE)
+    expect(screen.getByText(/change my label/, { selector: 'span' })).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Change my label (E)' }))
+    const form = screen.getByLabelText('Change the label')
+    expect(within(form).getByRole('button', { name: 'Fail' })).toHaveAttribute('aria-pressed', 'true')
+    const critique = within(form).getByLabelText('Critique (required)')
+    expect(critique).toHaveValue('It cancelled at once.')
+    expect(within(form).getByLabelText('Your name')).toHaveValue('Sam')
+    // Nothing changed yet, so there is nothing to save.
+    expect(within(form).getByRole('button', { name: 'Save the change' })).toBeDisabled()
+
+    await user.click(within(form).getByRole('button', { name: 'Pass' }))
+    await user.clear(critique)
+    await user.type(critique, '  It did ask in [[1].  ')
+    await user.click(within(form).getByRole('button', { name: 'Save the change' }))
+
+    expect(await screen.findByText('You changed this from Fail to Pass after seeing the judge.')).toBeInTheDocument()
+    expect(screen.getByText('Label changed.')).toBeInTheDocument()
+    expect(screen.queryByLabelText('Change the label')).toBeNull()
+    expect(fake.to(REVISE_ROUTE)[0]!.body).toEqual({ verdict: 'pass', critique: 'It did ask in [1].', labeler: 'Sam' })
+    expect(fake.to(REVEAL_ROUTE)).toHaveLength(2)
+    expect(screen.getByText('You and the judge disagree.')).toBeInTheDocument()
+    expect(within(screen.getByLabelText('Your first label')).getByText(/It cancelled at once\./)).toBeInTheDocument()
+  })
+
+  it('opens with E, and Cancel or Escape returns to the reveal without saving', async () => {
+    const user = userEvent.setup()
+    const fake = installFetch(flowRoutes())
+    renderApp('/classify')
+    await saveAndReveal(user)
+    await user.click(screen.getByRole('button', { name: 'Reveal what the judge said' }))
+    await screen.findByText(JUDGE_CRITIQUE)
+    ;(document.activeElement as HTMLElement).blur()
+    await user.keyboard('e')
+    expect(screen.getByLabelText('Change the label')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByLabelText('Change the label')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Change my label (E)' })).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Change my label (E)' }))
+    await user.keyboard('{Escape}')
+    expect(screen.queryByLabelText('Change the label')).toBeNull()
+    expect(fake.to(REVISE_ROUTE)).toHaveLength(0)
+  })
+
+  it('shows the server error and keeps the form when the change is refused', async () => {
+    const user = userEvent.setup()
+    installFetch(routes({ [REVISE_ROUTE]: failure(422, 'no_change', 'The verdict and critique are the same as the current label, so nothing was saved.') }))
+    renderApp('/classify')
+    await saveAndReveal(user)
+    await user.click(screen.getByRole('button', { name: 'Reveal what the judge said' }))
+    await user.click(await screen.findByRole('button', { name: 'Change my label (E)' }))
+    await user.type(screen.getByLabelText('Critique (required)', { selector: '#revise-current-critique' }), ' More.')
+    await user.click(screen.getByRole('button', { name: 'Save the change' }))
+    expect(await screen.findByText(/nothing was saved/)).toBeInTheDocument()
+    expect(screen.getByLabelText('Change the label')).toBeInTheDocument()
   })
 })
 
@@ -313,6 +425,39 @@ describe('labels list', () => {
     await user.click(screen.getByRole('button', { name: 'Reveal what the judge said' }))
     expect(await screen.findByText('This label is not for a queue item.')).toBeInTheDocument()
     expect(fake.to('GET /api/labels/hand-1/reveal')).toHaveLength(1)
+  })
+
+  it('marks revised labels and changes a label inline', async () => {
+    const user = userEvent.setup()
+    const original = savedLabel({ verdict: 'pass', critique: 'Looked fine at first.' })
+    const current = savedLabel({ id: `${original.id}~r1`, replaces: original.id, verdict: 'fail', critique: 'It cancelled at once.', at: '2026-11-12T12:00:00.000Z' })
+    const listed = [current, labels[1]!]
+    const fake = installFetch(routes({
+      'GET /api/labels': { body: { file: 'f', labels: listed, history: { [original.id]: [original] }, stats: labelStatsFixture({ total: 2, labelers: ['Alex', 'Sam'], revisions: 1 }) } },
+      [REVISE_ROUTE]: { status: 201, body: { label: savedLabel({ id: `${original.id}~r2`, replaces: current.id, verdict: 'pass', critique: 'Pass after all.' }) } },
+      'POST /api/labels/hand-1/revise': { status: 201, body: { label: savedLabel({ id: 'hand-1~r1', replaces: 'hand-1' }) } },
+    }))
+    renderApp('/classify/labels')
+    // The row shows the item id, with a badge, and the stats say how many were changed.
+    expect(await screen.findByText(original.id)).toBeInTheDocument()
+    expect(screen.queryByText(current.id)).toBeNull()
+    expect(screen.getAllByText('Revised')).toHaveLength(1)
+    expect(screen.getByText('1 changed after the first label')).toBeInTheDocument()
+
+    const row = screen.getByText(original.id).closest('tr')!
+    await user.click(within(row).getByRole('button', { name: 'Details' }))
+    expect(screen.getByText(/First label, made blind, by Sam/)).toBeInTheDocument()
+    expect(screen.getByText('Looked fine at first.')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Change label' }))
+    const form = screen.getByLabelText('Change the label')
+    expect(within(form).getByLabelText('Critique (required)')).toHaveValue('It cancelled at once.')
+    await user.click(within(form).getByRole('button', { name: 'Pass' }))
+    await user.click(within(form).getByRole('button', { name: 'Save the change' }))
+    await waitFor(() => expect(screen.queryByLabelText('Change the label')).toBeNull())
+    expect(fake.to(REVISE_ROUTE)[0]!.body).toMatchObject({ verdict: 'pass', critique: 'It cancelled at once.' })
+    // The list is fetched again so it shows the new version.
+    await waitFor(() => expect(fake.to('GET /api/labels').length).toBeGreaterThan(1))
   })
 
   it('shows an empty state with no labels', async () => {

@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { loadLabels } from '../../src/index.js'
-import type { LabelsResponse, QueueResponse } from '../../src/ui/api-types.js'
+import type { LabelsResponse, QueueResponse, RevealResponse } from '../../src/ui/api-types.js'
 import { fixture, type Fixture } from './harness.js'
 import { critiqueOf, saveSuite, type RunSpec } from './records.js'
 
@@ -251,6 +251,162 @@ describe('GET /api/labels/:id/reveal', () => {
       expect(r.status, id).toBe(404)
       expect(r.json().error.code).toBe('not_revealable')
     }
+  })
+})
+
+describe('POST /api/labels/:id/revise', () => {
+  const revise = (f: Fixture, itemId: string, body: Record<string, unknown>) => f.api.post(`/api/labels/${encodeURIComponent(itemId)}/revise`, body)
+  const reviseBody = (over: Record<string, unknown> = {}) => ({ labeler: 'ann', verdict: 'fail', critique: 'On a second look, it never asked.', ...over })
+  /** Labels run-00's "confirms-before-acting" (which the judge failed) as a blind pass. */
+  async function labelled() {
+    const f = await seeded()
+    const item = (await queue(f, '?limit=100')).items.find(i => i.runId === 'run-00' && i.criterion.id === CRITERIA[0])!
+    const first = await f.api.post('/api/labels', labelBody(item.itemId, { verdict: 'pass', critique: 'Seems fine to me.' }))
+    expect(first.status).toBe(201)
+    return { f, item, original: first.json().label }
+  }
+
+  it('appends a revision that replaces the current label and keeps the blind label in the file', async () => {
+    const { f, item, original } = await labelled()
+    const r = await revise(f, item.itemId, reviseBody({ critique: '  It acted without asking.  ', labeler: ' bo ' }))
+    expect(r.status).toBe(201)
+    const { label } = r.json()
+    expect(label).toMatchObject({
+      id: `${item.itemId}~r1`, replaces: item.itemId, verdict: 'fail', critique: 'It acted without asking.', labeler: 'bo',
+      group: original.group, criterion: original.criterion, input: original.input, output: original.output, sampled_by: original.sampled_by,
+    })
+    expect(new Date(label.at).toISOString()).toBe(label.at)
+    // Append-only: the first line is untouched, and the file is what `evals calibrate` reads.
+    expect(loadLabels(labelsFile(f))).toEqual([original, label])
+  })
+
+  it('chains a second revision onto the first', async () => {
+    const { f, item } = await labelled()
+    expect((await revise(f, item.itemId, reviseBody())).status).toBe(201)
+    const second = await revise(f, item.itemId, reviseBody({ verdict: 'pass', critique: 'Back to pass: it did confirm in [2].' }))
+    expect(second.status).toBe(201)
+    expect(second.json().label).toMatchObject({ id: `${item.itemId}~r2`, replaces: `${item.itemId}~r1`, verdict: 'pass' })
+    expect(loadLabels(labelsFile(f)).map(l => l.id)).toEqual([item.itemId, `${item.itemId}~r1`, `${item.itemId}~r2`])
+  })
+
+  it('answers 404 not_labelled for an item with no label, and writes nothing', async () => {
+    const f = await seeded()
+    const item = (await queue(f)).items[0]!
+    for (const id of [item.itemId, 'nope:nope']) {
+      const r = await revise(f, id, reviseBody())
+      expect(r.status, id).toBe(404)
+      expect(r.json().error.code).toBe('not_labelled')
+    }
+    expect(readFileOr(labelsFile(f))).toBe('')
+  })
+
+  it('answers 422 no_change when the verdict and trimmed critique are the same as the current label', async () => {
+    const { f, item } = await labelled()
+    const same = await revise(f, item.itemId, reviseBody({ verdict: 'pass', critique: '  Seems fine to me. ', labeler: 'someone else' }))
+    expect(same.status).toBe(422)
+    expect(same.json().error.code).toBe('no_change')
+    // The comparison is with the current label, not the blind one.
+    expect((await revise(f, item.itemId, reviseBody())).status).toBe(201)
+    expect((await revise(f, item.itemId, reviseBody())).json().error.code).toBe('no_change')
+    expect((await revise(f, item.itemId, reviseBody({ verdict: 'pass', critique: 'Seems fine to me.' }))).status).toBe(201)
+    expect(loadLabels(labelsFile(f))).toHaveLength(3)
+  })
+
+  it('validates the body like POST /api/labels', async () => {
+    const { f, item } = await labelled()
+    const cases: [string, Record<string, unknown>, RegExp][] = [
+      ['no critique', { critique: undefined }, /critique/],
+      ['blank critique', { critique: '   ' }, /critique is required/],
+      ['long critique', { critique: 'x'.repeat(20_001) }, /critique/],
+      ['no labeler', { labeler: ' ' }, /labeler is required/],
+      ['bad verdict', { verdict: 'maybe' }, /verdict/],
+      ['replaces', { replaces: 'x' }, /replaces/],
+      ['sampled_by', { sampled_by: 'random' }, /sampled_by/],
+      ['itemId', { itemId: item.itemId }, /itemId/],
+    ]
+    for (const [name, over, message] of cases) {
+      const r = await revise(f, item.itemId, { ...reviseBody(), ...over })
+      expect(r.status, name).toBe(400)
+      expect(r.json().error.code, name).toBe('bad_request')
+      expect(r.json().error.message, name).toMatch(message)
+    }
+    expect(loadLabels(labelsFile(f))).toHaveLength(1)
+  })
+
+  it('shows the current label in the reveal, with the blind label and whether the judge agreed with each', async () => {
+    const { f, item } = await labelled()
+    const id = encodeURIComponent(item.itemId)
+    const before = (await f.api.get(`/api/labels/${id}/reveal`)).json<RevealResponse>()
+    expect(before).toMatchObject({ labelId: item.itemId, agrees: false, blindAgrees: false, original: null, revisions: 0 })
+
+    await revise(f, item.itemId, reviseBody())
+    const after = await f.api.get(`/api/labels/${id}/reveal`)
+    expect(after.status).toBe(200)
+    expect(after.json<RevealResponse>()).toMatchObject({
+      labelId: `${item.itemId}~r1`, runId: 'run-00',
+      judge: { verdict: 'fail' },
+      human: { verdict: 'fail', critique: 'On a second look, it never asked.', labeler: 'ann' },
+      agrees: true,
+      original: { verdict: 'pass', critique: 'Seems fine to me.' },
+      revisions: 1,
+      blindAgrees: false,
+    })
+    // The reveal is by item id. The revision line's id is not an item.
+    expect((await f.api.get(`/api/labels/${encodeURIComponent(`${item.itemId}~r1`)}/reveal`)).status).toBe(403)
+  })
+
+  it('lists current labels with the superseded versions in history, and counts items in the stats', async () => {
+    const { f, item, original } = await labelled()
+    const other = (await queue(f, '?limit=100')).items[0]!
+    await f.api.post('/api/labels', labelBody(other.itemId))
+    await revise(f, item.itemId, reviseBody())
+    const second = (await revise(f, item.itemId, reviseBody({ verdict: 'pass', critique: 'Pass after all.' }))).json().label
+    const body = (await f.api.get('/api/labels')).json<LabelsResponse>()
+    expect(body.labels.map(l => l.id).sort()).toEqual([other.itemId, second.id].sort())
+    expect(Object.keys(body.history)).toEqual([item.itemId])
+    expect(body.history[item.itemId]!.map(l => l.id)).toEqual([original.id, `${item.itemId}~r1`])
+    expect(body.stats).toMatchObject({ total: 2, revisions: 1 })
+    expect(body.stats.byVerdict.pass + body.stats.byVerdict.fail).toBe(2)
+  })
+
+  it('leaves the queue, its counts and the random quota as they were', async () => {
+    const f = await seeded()
+    const items = (await queue(f, '?limit=200')).items
+    const random = items.find(i => i.reason === 'random')!
+    const targeted = items.find(i => i.reason !== 'random')!
+    await f.api.post('/api/labels', labelBody(random.itemId, { verdict: 'pass', critique: 'Fine.' }))
+    await f.api.post('/api/labels', labelBody(targeted.itemId))
+    const before = await queue(f, '?limit=200')
+    const statsBefore = (await f.api.get('/api/labels')).json<LabelsResponse>().stats
+
+    for (const id of [random.itemId, targeted.itemId]) expect((await revise(f, id, reviseBody({ verdict: 'pass', critique: 'Changed.' }))).status).toBe(201)
+    expect((await revise(f, random.itemId, reviseBody({ critique: 'Changed again.' }))).status).toBe(201)
+
+    const after = await queue(f, '?limit=200')
+    expect(after.stats).toEqual(before.stats)
+    expect(after.stats).toMatchObject({ labelled: 2, labelledRandom: 1 })
+    expect(after.items.map(i => i.itemId)).toEqual(before.items.map(i => i.itemId))
+    const statsAfter = (await f.api.get('/api/labels')).json<LabelsResponse>().stats
+    expect(statsAfter).toMatchObject({ total: 2, random: statsBefore.random, targeted: statsBefore.targeted, randomShare: statsBefore.randomShare, bySplit: statsBefore.bySplit, revisions: 2 })
+    // The revisions kept how each item was sampled.
+    const lines = loadLabels(labelsFile(f))
+    expect(lines.filter(l => l.replaces !== undefined && l.id.startsWith(random.itemId)).every(l => l.sampled_by === 'random')).toBe(true)
+    expect(lines.filter(l => l.replaces !== undefined && l.id.startsWith(targeted.itemId)).every(l => l.sampled_by === 'targeted')).toBe(true)
+    // A revised item is still labelled.
+    expect((await f.api.post('/api/labels', labelBody(random.itemId))).json().error.code).toBe('duplicate_label')
+  })
+
+  it('treats a broken replace chain in the file as a corrupt record', async () => {
+    const { f, item, original } = await labelled()
+    const orphan = { ...original, id: 'gone:x~r1', replaces: 'gone:x' }
+    writeFileSync(labelsFile(f), readFileSync(labelsFile(f), 'utf8') + JSON.stringify(orphan) + '\n')
+    for (const path of ['/api/labels', '/api/queue', `/api/labels/${encodeURIComponent(item.itemId)}/reveal`]) {
+      const r = await f.api.get(path)
+      expect(r.status, path).toBe(422)
+      expect(r.json().error.code, path).toBe('corrupt_record')
+      expect(r.json().error.message, path).toMatch(/replaces "gone:x", which is not in the file/)
+    }
+    expect((await revise(f, item.itemId, reviseBody())).json().error.code).toBe('corrupt_record')
   })
 })
 

@@ -5,7 +5,7 @@ import type { AddressInfo } from 'node:net'
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { z } from 'zod'
 import { ContaminationError } from '../calibration/evaluate.js'
-import { SplitViolationError } from '../calibration/labels.js'
+import { itemIdOfLabel, LabelChainError, resolveLabels, revisionId, SplitViolationError, type Label } from '../calibration/labels.js'
 import { FRAMEWORK_VERSION } from '../core/version.js'
 import type { Config } from '../core/config.js'
 import type { ModelProvider, Reporter } from '../core/interfaces.js'
@@ -95,6 +95,7 @@ export const API_ROUTES = [
   'POST /api/labels',
   'GET /api/labels',
   'GET /api/labels/:id/reveal',
+  'POST /api/labels/:id/revise',
   'POST /api/calibrate/preview',
   'POST /api/calibrate/start',
   'GET /api/calibration',
@@ -125,12 +126,13 @@ const calibrateShape = {
 const CalibrateRequestSchema = z.strictObject(calibrateShape)
 const CalibrateStartSchema = z.strictObject({ ...calibrateShape, ...startShape })
 
-const LabelRequestSchema = z.strictObject({
-  itemId: z.string().min(1).max(300),
+const labelAnswerShape = {
   labeler: z.string().trim().min(1, 'labeler is required').max(100),
   verdict: z.enum(['pass', 'fail']),
   critique: z.string().trim().min(1, 'a critique is required on every label').max(20_000),
-})
+}
+const LabelRequestSchema = z.strictObject({ itemId: z.string().min(1).max(300), ...labelAnswerShape })
+const ReviseRequestSchema = z.strictObject(labelAnswerShape)
 
 function parseBody<T extends z.ZodType>(schema: T, body: unknown): z.infer<T> {
   const parsed = schema.safeParse(body)
@@ -361,12 +363,30 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServer>
     return { suites, labels: readLabels(), rubricFor, limit, seed: options.queueSeed }
   }
 
+  /** Every line of the label file, revisions included. */
   function readLabels() {
     try {
       return listLabels(labelsFile)
     } catch (e) {
       throw new ApiError(422, 'corrupt_record', message(e))
     }
+  }
+
+  /** The label file with its replace chains followed. A broken chain is a corrupt file. */
+  function readResolved() {
+    const all = readLabels()
+    try {
+      return { all, ...resolveLabels(all) }
+    } catch (e) {
+      throw new ApiError(422, 'corrupt_record', message(e))
+    }
+  }
+
+  /** The current label for an item id, and the versions it superseded (oldest first). */
+  function labelForItem(itemId: string): { current: Label; history: Label[] } | null {
+    const { current, history } = readResolved()
+    const found = current.find(l => itemIdOfLabel(l) === itemId)
+    return found ? { current: found, history: history.get(itemId) ?? [] } : null
   }
 
   // --------------------------------------------------------------- handlers
@@ -570,7 +590,7 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServer>
     'POST /api/labels': async ({ req }) => {
       const request = parseBody(LabelRequestSchema, await readJson(req, maxBody))
       const options_ = queueOptions()
-      if (options_.labels.some(l => l.id === request.itemId)) throw new ApiError(409, 'duplicate_label', `Item "${request.itemId}" already has a label.`)
+      if (readResolved().current.some(l => itemIdOfLabel(l) === request.itemId)) throw new ApiError(409, 'duplicate_label', `Item "${request.itemId}" already has a label.`)
       const found = findQueueItem(options_, request.itemId)
       if (found.status === 'unknown') throw new ApiError(404, 'item_not_found', `No unlabelled item "${request.itemId}".`)
       if (found.status === 'not_in_queue') {
@@ -599,24 +619,54 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServer>
     },
 
     'GET /api/labels': () => {
-      const labels = readLabels()
-      const body: LabelsResponse = { file: labelsFile, labels, stats: labelStats(labels) }
+      const { all, current, history } = readResolved()
+      const body: LabelsResponse = { file: labelsFile, labels: current, history: Object.fromEntries(history), stats: labelStats(all) }
       return { body }
     },
 
     'GET /api/labels/:id/reveal': ({ params }) => {
-      const label = readLabels().find(l => l.id === params.id)
-      if (!label) throw new ApiError(403, 'not_labelled', 'The judge\'s verdict is shown only after the item has a human label.')
-      const revealed = revealItem(label, runId => {
+      const found = labelForItem(params.id!)
+      if (!found) throw new ApiError(403, 'not_labelled', 'The judge\'s verdict is shown only after the item has a human label.')
+      const revealed = revealItem(found.current, runId => {
         try {
           return findRun(paths.runs, runId)
         } catch {
           return null
         }
-      })
+      }, found.history)
       if (!revealed) throw new ApiError(404, 'not_revealable', 'This label is not for an item from a saved run, or the run is no longer saved.')
       const body: RevealResponse = revealed
       return { body }
+    },
+
+    // A change after the first label is a new line that replaces the current one. The blind label stays in the file.
+    'POST /api/labels/:id/revise': async ({ req, params }) => {
+      const request = parseBody(ReviseRequestSchema, await readJson(req, maxBody))
+      const itemId = params.id!
+      const found = labelForItem(itemId)
+      if (!found) throw new ApiError(404, 'not_labelled', `Item "${itemId}" has no label to change. Label it first.`)
+      const { current, history } = found
+      if (request.verdict === current.verdict && request.critique === current.critique.trim()) {
+        throw new ApiError(422, 'no_change', 'The verdict and critique are the same as the current label, so nothing was saved.')
+      }
+      // Everything but the answer, the author and the time is copied, so the split and the random quota stay as they were.
+      const { verdict: _v, critique: _c, labeler: _l, at: _at, replaces: _r, id: _id, ...fixed } = current
+      try {
+        const label = appendLabel(labelsFile, {
+          ...fixed,
+          id: revisionId(itemId, history.length),
+          verdict: request.verdict,
+          critique: request.critique,
+          labeler: request.labeler,
+          replaces: current.id,
+        })
+        const body: LabelResponse = { label }
+        return { status: 201, body }
+      } catch (e) {
+        if (e instanceof DuplicateLabelError) throw new ApiError(409, 'duplicate_label', e.message)
+        if (e instanceof LabelValidationError) throw new ApiError(400, 'bad_request', e.message)
+        throw e
+      }
     },
 
     'POST /api/calibrate/preview': async ({ req }) => {
@@ -699,13 +749,21 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServer>
       }
     })()
     const selection = request.selection ?? 'random'
+    const current = (() => {
+      try {
+        return resolveLabels(labels).current
+      } catch (e) {
+        throw new ApiError(422, 'corrupt_record', message(e))
+      }
+    })()
     const plan = planCalibration({ config, labels, rubric: found.rubric, split: request.split, selection })
+    // The current labels decide what is measured. A revision changes them, so it needs a new preview.
     const fingerprint = {
       kind: 'calibrate',
       rubric: digest(found.rubric),
       split: request.split,
       selection,
-      labels: digest(labels),
+      labels: digest(current),
       judge: config.models.judge,
       pricing: config.pricing[config.models.judge.model] ?? null,
       timeoutMs: config.timeouts.judgeMs,
@@ -798,7 +856,7 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServer>
       if (res.headersSent) return void res.end()
       if (e instanceof ApiError) return apiError(res, e, scrub)
       if (e instanceof InvalidIdError) return apiError(res, new ApiError(400, 'bad_request', e.message), scrub)
-      if (e instanceof CorruptRecordError) return apiError(res, new ApiError(422, 'corrupt_record', e.message), scrub)
+      if (e instanceof CorruptRecordError || e instanceof LabelChainError) return apiError(res, new ApiError(422, 'corrupt_record', e.message), scrub)
       apiError(res, new ApiError(500, 'internal', `Unexpected error: ${message(e)}`), scrub)
     }
   }

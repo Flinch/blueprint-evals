@@ -117,6 +117,24 @@ describe('evals validate', () => {
     expect(h.stdout()).toMatch(/Only 0% of labels were randomly sampled/)
   })
 
+  it('counts items, says how many labels were revised, and fails on a broken replace chain', async () => {
+    const labels = syntheticLabels(10)
+    const revised = [0, 1].map(i => ({ ...labels[i]!, id: `${labels[i]!.id}~r1`, replaces: labels[i]!.id, verdict: 'pass' as const }))
+    const files = (extra: object[]) => ({
+      'evals.config.yaml': exampleConfigFor('http://127.0.0.1:1'),
+      'scenarios/a.yaml': scenario('a'),
+      'labels.jsonl': toJsonl([...labels, ...revised, ...extra] as typeof labels),
+    })
+    const ok = harness({ cwd: writeFiles(tempDir(), files([])) })
+    expect(await runCli(['validate', '--labels', 'labels.jsonl'], ok.io)).toBe(0)
+    expect(ok.stdout()).toMatch(/Labels: 10 in labels\.jsonl, 2 of them revised after the first label \(12 lines\)/)
+
+    const fork = { ...revised[0]!, id: `${labels[0]!.id}~r2` }
+    const bad = harness({ cwd: writeFiles(tempDir(), files([fork])) })
+    expect(await runCli(['validate', '--labels', 'labels.jsonl'], bad.io)).toBe(1)
+    expect(bad.stdout()).toMatch(/both replace/)
+  })
+
   it('treats a missing file or an unusable invocation as a usage problem (2), not a validation failure', async () => {
     const dir = writeFiles(tempDir(), { 'scenarios/a.yaml': scenario('a') })
     for (const [argv, pattern] of [

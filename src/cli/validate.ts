@@ -1,6 +1,6 @@
 import { dirname, resolve } from 'node:path'
 import { parseArgs } from 'node:util'
-import { loadLabels, checkLabels } from '../calibration/labels.js'
+import { checkLabels, LabelChainError, loadLabels, resolveLabels, type ResolvedLabels } from '../calibration/labels.js'
 import type { Config } from '../core/config.js'
 import { loadConfig, loadRubric, loadScenarios, type LoadedScenario } from '../core/load.js'
 import type { Rubric } from '../core/scenario.js'
@@ -84,8 +84,16 @@ export async function validateCommand(argv: string[], io: CliIo): Promise<number
   }
 
   const labels = labelsFile ? tryLoadLabels(labelsFile, errors) : undefined
+  let resolved: ResolvedLabels | undefined
   if (labels) {
-    warnings.push(...checkLabels(labels))
+    // A broken replace chain is an error: calibrate refuses the file.
+    try {
+      resolved = resolveLabels(labels)
+      warnings.push(...checkLabels(labels))
+    } catch (e) {
+      if (!(e instanceof LabelChainError)) throw e
+      errors.push(`${labelsFile}: ${e.message}`)
+    }
     if (rubric) {
       const known = new Set(rubric.criteria.map(c => c.id))
       const unknown = [...new Set(labels.filter(l => !known.has(l.criterion)).map(l => l.criterion))]
@@ -104,7 +112,10 @@ export async function validateCommand(argv: string[], io: CliIo): Promise<number
   out(`Scenarios: ${scenarios.length} in ${shown(io, scenariosDir)}`)
   if (scenarios.length > 0) out(`  ${withModel} need a model (persona, rubric or goal), ${scenarios.length - withModel} deterministic only`)
   out(`Rubrics: ${rubricFiles.size} used by scenarios${rubric ? `, plus ${shown(io, rubricFile!)}` : ''}`)
-  if (labels) out(`Labels: ${labels.length} in ${shown(io, labelsFile!)}`)
+  if (labels) {
+    const revised = resolved && resolved.revised.size > 0 ? `, ${resolved.revised.size} of them revised after the first label (${labels.length} lines)` : ''
+    out(`Labels: ${resolved ? resolved.current.length : labels.length} in ${shown(io, labelsFile!)}${revised}`)
+  }
 
   if (config) {
     const check = crossCheck(config, scenarios, io.env, f => shown(io, f))

@@ -124,6 +124,8 @@ fail with a critique. Labels are written in the same `labels.jsonl` format that
 `evals calibrate` reads. The queue hides the judge's verdict until you have
 labelled an item, so you do not anchor on it, and it keeps at least 30 percent of
 labels randomly sampled (see [the judge methodology](docs/design/0002-judge-methodology.md)).
+After the reveal you can change your label. The change is saved as a new line
+and your blind label is kept, and calibration reports agreement on both.
 
 It is local only. The server listens on `127.0.0.1`, never on a network address,
 and needs a random access token that is printed in the URL it shows at startup:

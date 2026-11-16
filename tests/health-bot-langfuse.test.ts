@@ -102,7 +102,9 @@ describe('the Langfuse tracer', () => {
     expect(attr(turn1, A.OBSERVATION_INPUT)).toBe('Please cancel my appointment')
     expect(attr(turn1, A.OBSERVATION_OUTPUT)).toBe('Checking.\n\nCancelled.')
 
-    const gens = inTurn1.filter(s => attr(s, A.OBSERVATION_TYPE) === 'generation')
+    // Spans export in the order they end, which is not guaranteed to be the order they started.
+    const startNs = (s: ReadableSpan) => s.startTime[0] * 1e9 + s.startTime[1]
+    const gens = inTurn1.filter(s => attr(s, A.OBSERVATION_TYPE) === 'generation').sort((a, b) => startNs(a) - startNs(b))
     const tool = inTurn1.find(s => attr(s, A.OBSERVATION_TYPE) === 'tool')!
     for (const s of [...gens, tool]) expect(parentId(s)).toBe(turn1.spanContext().spanId)
 

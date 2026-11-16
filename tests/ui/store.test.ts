@@ -166,6 +166,19 @@ describe('label file', () => {
     expect(listLabels(f)).toHaveLength(1)
   })
 
+  it('appends a revision only when it extends a chain cleanly', () => {
+    const f = file()
+    appendLabel(f, good({ id: 'r:c' }))
+    const base = good()
+    expect(() => appendLabel(f, { ...base, id: 'gone:c~r1', replaces: 'gone:c' })).toThrow(/not in the file/)
+    expect(() => appendLabel(f, { ...base, id: 'r:c~r1', replaces: 'r:c', output: 'Edited.' })).toThrow(/changes "output"/)
+    appendLabel(f, { ...base, id: 'r:c~r1', replaces: 'r:c', verdict: 'pass' })
+    // A second revision of the same line would fork the chain.
+    expect(() => appendLabel(f, { ...base, id: 'r:c~r2', replaces: 'r:c', verdict: 'pass' })).toThrow(LabelValidationError)
+    expect(listLabels(f).map(l => l.id)).toEqual(['r:c', 'r:c~r1'])
+    expect(labelStats(listLabels(f))).toMatchObject({ total: 1, revisions: 1, byVerdict: { pass: 1, fail: 0 } })
+  })
+
   it('refuses to append to a file that is already broken, rather than hiding it', () => {
     const f = file()
     appendLabel(f, good({ id: 'a' }))

@@ -27,6 +27,29 @@ const calPreview = (over: Partial<CalibratePreviewResponse> = {}): CalibratePrev
 })
 
 describe('calibration report', () => {
+  it('says how many labels were changed after seeing the judge, with the agreement on the blind labels', async () => {
+    const r = report()
+    const blindMetrics = { ...r.metrics, accuracy: 0.78, tnr: { ...r.metrics.tnr, rate: 0.6 }, tpr: { ...r.metrics.tpr, rate: 0.9 } }
+    installFetch(baseRoutes({ 'GET /api/calibration': { body: { latest: calibrationRecord({ report: report({ revisions: { revised: 3, verdictChanged: 3, blindMetrics } }) }) } } }))
+    renderApp('/calibration')
+    const note = await screen.findByTestId('revision-note')
+    expect(note).toHaveTextContent('3 of these labels were changed after seeing the judge. Agreement on your original, blind labels: 78%, against 81% with the changes.')
+    expect(screen.getByLabelText('Labels changed after seeing the judge')).toHaveTextContent(/true negative rate is 60%/)
+  })
+
+  it('shows no revision note when no label was changed, or for a report saved before revisions existed', async () => {
+    installFetch(baseRoutes({ 'GET /api/calibration': { body: { latest: calibrationRecord({ report: report({ revisions: { revised: 0, verdictChanged: 0, blindMetrics: null } }) }) } } }))
+    const first = renderApp('/calibration')
+    await screen.findByLabelText('True negative rate')
+    expect(screen.queryByTestId('revision-note')).toBeNull()
+    first.unmount()
+    installEventSource()
+    installFetch(baseRoutes())
+    renderApp('/calibration')
+    await screen.findByLabelText('True negative rate')
+    expect(screen.queryByTestId('revision-note')).toBeNull()
+  })
+
   it('shows the true negative rate before the true positive rate, and it is the most prominent', async () => {
     installFetch(baseRoutes())
     renderApp('/calibration')

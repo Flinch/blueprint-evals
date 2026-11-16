@@ -136,7 +136,7 @@ export function baseRoutes(over: Routes = {}): Routes {
     'GET /api/rubrics': { body: rubrics() },
     'GET /api/run/status': { body: { activeJob: null } satisfies RunStatusResponse },
     'GET /api/queue': { body: queue() },
-    'GET /api/labels': { body: { file: '/work/demo/.evals/labels.jsonl', labels: [], stats: labelStatsFixture() } },
+    'GET /api/labels': { body: { file: '/work/demo/.evals/labels.jsonl', labels: [], history: {}, stats: labelStatsFixture() } },
     'GET /api/calibration': { body: { latest: calibrationRecord() } },
     ...over,
   }
@@ -152,6 +152,7 @@ export function labelStatsFixture(over: Partial<import('../../src/ui/api-types')
     byVerdict: { pass: 2, fail: 3 },
     bySplit: { train: 1, dev: 2, test: 2 },
     labelers: ['Sam'],
+    revisions: 0,
     warnings: [],
     ...over,
   }

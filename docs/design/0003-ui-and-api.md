@@ -97,7 +97,12 @@ Everything lives under `<workdir>/.evals/`, where the workdir is the directory
 rubricId, rubricVersion, labelsFile, split, selection, command, report }`, where
 `report` is the `CalibrationReport` from `src/calibration/evaluate.ts`.
 
-**Labels** are the format in 0002, one JSON object per line, append-only.
+**Labels** are the format in 0002, one JSON object per line, append-only. A
+changed label is a new line with `replaces` set to the id of the line it
+supersedes and an id of `<itemId>~r<n>`. Nothing already in the file is
+rewritten, so the first, blind label is always kept. Readers follow the chains
+and use the latest version of each item (see "Changing a label after seeing the
+judge" in 0002).
 
 Stored traces hold whatever the agent said, which could include a secret the
 agent echoed. The files on disk are not scrubbed. API responses are (see
@@ -197,6 +202,7 @@ what a front end should switch on. `details` is present for `plan_invalid`
 | 403 | `forbidden_origin` | A cross-origin request |
 | 403 | `not_labelled` | Reveal before the item has a label |
 | 404 | `not_found` | No such endpoint, suite or run |
+| 404 | `not_labelled` | Revise an item that has no label yet |
 | 404 | `item_not_found` | No unlabelled queue item with that id |
 | 404 | `not_revealable` | The label is not for a queue item, or its run is gone |
 | 405 | `method_not_allowed` | Wrong method for the endpoint |
@@ -211,6 +217,7 @@ what a front end should switch on. `details` is present for `plan_invalid`
 | 422 | `config_invalid` | The config does not validate |
 | 422 | `plan_invalid` | Scenarios or selection cannot run. `details.errors` lists them |
 | 422 | `item_not_in_queue` | The item exists but is not up for review |
+| 422 | `no_change` | A revision with the same verdict and critique as the current label |
 | 422 | `corrupt_record` | A saved file could not be read |
 | 428 | `confirmation_required` | See the confirmation protocol |
 | 500 | `store_unwritable` | `.evals/` could not be written |
@@ -341,19 +348,49 @@ including `split` and `sampled_by`), 404 `item_not_found`, 409
 `duplicate_label`, 422 `item_not_in_queue`, 422 `corrupt_record` (the file is
 already broken, so nothing is appended).
 
-**`GET /api/labels`** returns `LabelsResponse`: the file, every label, and
-`LabelStats` (counts, random share, verdict counts, split counts, labelers, and
-the same sanity warnings `evals validate` gives).
+**`GET /api/labels`** returns `LabelsResponse`: the file, the current label of
+each item (a changed label appears once, as its latest version), `history` (for
+each changed item, keyed by item id, the versions it superseded, oldest first),
+and `LabelStats` (counts of items, random share, verdict counts, split counts,
+labelers, `revisions` (how many items were changed), and the same sanity
+warnings `evals validate` gives).
 
-**`GET /api/labels/:id/reveal`** returns `RevealResponse` for a label, with `:id`
-URL-encoded (item ids contain a colon). It returns the judge's verdict, critique
-and criticality for that item, the human label, and whether they agree. A hand-made
+**`GET /api/labels/:id/reveal`** returns `RevealResponse` for an item, with `:id`
+the item id, URL-encoded (item ids contain a colon). It returns the judge's
+verdict, critique and criticality for that item, the current human label, and
+whether they agree. When the label was changed, `original` is the first, blind
+label, `revisions` counts the changes, and `blindAgrees` says whether the judge
+agrees with the blind label (`agrees` is about the current one). A hand-made
 label can name a criterion the judge found not applicable. Then `judge.verdict` is
-`not_applicable` and `agrees` is `null`, because there is no graded verdict to
-compare with. 403
+`not_applicable`, and `agrees` and `blindAgrees` are `null`, because there is no
+graded verdict to compare with. 403
 `not_labelled` if the id has no label (this is also the answer for ids that do
 not exist, so the answer does not depend on whether a run does), 404
 `not_revealable` if the label is not for a queue item or its run is gone.
+
+**`POST /api/labels/:id/revise`** changes the label of an item that already has
+one. `:id` is the item id, URL-encoded. It takes `ReviseRequest` and returns 201
+`LabelResponse` with the new line:
+
+```ts
+interface ReviseRequest { labeler: string; verdict: 'pass' | 'fail'; critique: string }
+```
+
+The body is checked like `POST /api/labels` (same limits, critique trimmed,
+unknown fields refused). The server appends a new line that copies the
+original's group, criterion, input, output and `sampled_by`, sets `replaces` to
+the current label's id, takes the id `<itemId>~r<n>`, and stamps `at`. The
+blind label and any earlier revisions stay in the file. Because the split and
+`sampled_by` are copied, a revision never moves an item between splits or
+changes the random quota, and the queue's counts are unchanged. Errors: 400 (as
+for `POST /api/labels`), 404 `not_labelled` if the item has no label, 422
+`no_change` if the verdict and the trimmed critique equal the current label's,
+422 `corrupt_record` if the label file is already broken.
+
+The reveal endpoint answers anyone once an item is labelled, so the server
+cannot know whether the person looked. Every revision is therefore treated as
+made after seeing the judge, and calibration reports agreement on the blind
+labels next to the headline numbers.
 
 ### Calibration
 
@@ -446,7 +483,8 @@ independent of the reason, so position says nothing. See the open questions.
 
 One item per run and rubric criterion, from every saved run that has a response to
 label. `itemId` is `<runId>:<criterionId>`, and it is also the `id` of the label
-made from it, so "already labelled" is a lookup. The `output` is the final
+made from it, so "already labelled" is a lookup. A changed label keeps the item
+id with a `~r<n>` suffix, and the item stays labelled. The `output` is the final
 assistant reply in the run, and everything before it is the input. `group` is the
 run id, so every criterion of one conversation lands in the same train, dev or
 test split.
@@ -609,6 +647,12 @@ Choices worth knowing:
   `GET /api/labels/:id/reveal` only after `POST /api/labels` succeeds and the person
   asks for it. Tests assert that neither the reason nor the judge's text is in the
   DOM before the label is saved.
+- **Changing a label.** After the reveal, "Change my label" (shortcut E) opens
+  the verdict and critique form pre-filled with the current label. Saving calls
+  `POST /api/labels/:id/revise` and fetches the reveal again, which then says
+  what was changed. The label list offers the same action on each label and
+  marks changed labels "Revised". Nothing about the judge appears before the
+  first label is saved, and only a labelled item can be changed.
 - **Confirmation.** The page never calls `POST /api/run/start` or
   `POST /api/calibrate/start` without a preview of the same request and a click in a
   dialog that states the scope and the number of model calls. A changed selection or
@@ -728,8 +772,9 @@ export type ErrorCode =
   | 'duplicate_label' //         409
   | 'item_not_found' //          404: no such queue item
   | 'item_not_in_queue' //       422: the item exists but is not up for review (an unsampled pass)
-  | 'not_labelled' //            403: reveal before the item has a human label
+  | 'not_labelled' //            403: reveal before the item has a human label. 404 from revise: no label to change
   | 'not_revealable' //          404: the label is not for a queue item, or its run is gone
+  | 'no_change' //               422: a revision with the same verdict and critique as the current label
   | 'corrupt_record' //          422: a saved file could not be read
   | 'store_unwritable' //        500: the .evals directory could not be written
   | 'internal' //               500
@@ -1063,13 +1108,28 @@ export interface LabelRequest {
   critique: string
 }
 
+/**
+ * The body of POST /api/labels/:id/revise, where `:id` is the item id. A
+ * revision is a new line that replaces the current label. The blind label stays
+ * in the file.
+ */
+export interface ReviseRequest {
+  labeler: string
+  verdict: 'pass' | 'fail'
+  /** Required, as on every label. */
+  critique: string
+}
+
 export interface LabelResponse {
   label: Label
 }
 
 export interface LabelsResponse {
   file: string
+  /** The current label of each item. A changed label appears once, as its latest version. */
   labels: Label[]
+  /** For each item whose label was changed, keyed by item id: the superseded versions, oldest first (the blind label first). */
+  history: Record<string, Label[]>
   stats: LabelStats
 }
 

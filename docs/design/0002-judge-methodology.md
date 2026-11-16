@@ -216,6 +216,7 @@ Blueprint, a CLI, or a hand-edited file.
 | `labeler` | Who labelled it |
 | `sampled_by` | `random` or `targeted` |
 | `at` | ISO timestamp |
+| `replaces` | Optional. Set only on a revision: the id of the line it supersedes. See [Changing a label after seeing the judge](#changing-a-label-after-seeing-the-judge) |
 
 There is no `split` field. It is derived from the hash below, and a stored value
 would let an example be moved to the wrong side by hand, so a file that contains
@@ -223,8 +224,8 @@ one is rejected.
 
 ### Splits and the contamination guard
 
-- The split is assigned by a stable hash of the group (or the id when there is
-  no group), roughly 15 percent train and 42.5 percent each dev and test, so an
+- The split is assigned by a stable hash of the group (or the item id when there
+  is no group, so a revision lands with its original), roughly 15 percent train and 42.5 percent each dev and test, so an
   item never moves between splits as labels are added. A test pins golden
   values so the hash cannot change by accident.
 - Anchors may be built only from `train` labels. `anchorsFromLabels` throws on
@@ -275,6 +276,43 @@ items. Every label records which way it was sampled.
 
 Each label records who made it. With two labelers on overlapping items, the
 agreement between them is reported as the ceiling for any judge.
+
+### Changing a label after seeing the judge
+
+A person labels an item blind, then may reveal what the judge said, and may
+then want to change their verdict or critique. The blind label is evidence, so
+it is never lost:
+
+- **The blind label stays.** A change is a new line appended to the file. It
+  sets `replaces` to the id of the line it supersedes and takes the id
+  `<itemId>~r<n>` (`n` counts up from 1). Nothing already in the file is
+  rewritten, so the file stays append-only and the full history is on disk.
+- **A revision copies the fixed fields.** `group`, `criterion`, `input`,
+  `output` and `sampled_by` are the original's, so a revision never moves an
+  item to another split, never changes its content key for the contamination
+  guard, and never changes the random quota. Only the verdict, critique,
+  labeler and time change.
+- **Chains are checked.** `resolveLabels` follows every chain and refuses a file
+  where a revision replaces an id that is not there, two lines replace the same
+  id, lines replace one another in a cycle, a revision is about another item, or
+  a revision changes a fixed field. `evals validate` reports these as errors and
+  says how many labels were revised. `evals calibrate` refuses the file.
+- **Everything that means "the person's answer" uses the current label**, the
+  end of each chain: the review queue and its counts, label stats, the
+  contamination guard, few-shot examples, and calibration.
+- **Calibration also reports the blind labels.** The report's `revisions` block
+  counts the measured labels that were changed and recomputes the rates against
+  the original, blind verdicts, using the same judge answers, so no extra model
+  call is made. The page and the terminal report show both.
+
+Why: a revision can only be made once the judge's answer was available. The
+reveal endpoint answers anyone after the first label, so every revision is
+treated as made after seeing the judge, whether or not the person looked. A
+revision can therefore drift toward the judge, and agreement measured on
+revised labels can flatter it. Reporting both keeps that visible. The blind
+rates are the safer estimate when they differ. A high rate of revisions toward
+the judge is a signal in its own right: it often means the rubric wording is
+unclear, and the criterion needs rewording before more labelling.
 
 ### Judge identity and variability
 

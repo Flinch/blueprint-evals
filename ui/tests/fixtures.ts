@@ -246,6 +246,9 @@ export const reveal = (over: Partial<Reveal> = {}): Reveal => ({
   runError: null,
   human: { verdict: 'fail', critique: 'It cancelled at once.', labeler: 'Sam', at: '2026-11-12T11:00:00.000Z' },
   agrees: true,
+  original: null,
+  revisions: 0,
+  blindAgrees: true,
   ...over,
 })
 

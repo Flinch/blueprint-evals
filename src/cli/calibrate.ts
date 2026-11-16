@@ -1,6 +1,6 @@
 import { parseArgs } from 'node:util'
 import { ContaminationError, formatReport } from '../calibration/evaluate.js'
-import { loadLabels, SplitViolationError } from '../calibration/labels.js'
+import { loadLabels, resolveLabels, SplitViolationError } from '../calibration/labels.js'
 import { loadConfig, loadRubric } from '../core/load.js'
 import type { ModelProvider } from '../core/interfaces.js'
 import { executeCalibration, planCalibration } from '../engine/calibrate.js'
@@ -69,7 +69,12 @@ export async function calibrateCommand(argv: string[], io: CliIo): Promise<numbe
   if (selection !== 'random' && selection !== 'all') throw new UsageError(`--selection must be random or all, got "${selection}"`)
 
   const config = orUsage(() => loadConfig(configPath(io, values.config)))
-  const labels = orUsage(() => loadLabels(requireFile(io, values.labels!, 'labels file')))
+  // Every line of the file, revisions included. A broken replace chain is a usage problem, like a line that does not parse.
+  const labels = orUsage(() => {
+    const all = loadLabels(requireFile(io, values.labels!, 'labels file'))
+    resolveLabels(all)
+    return all
+  })
   const rubric = orUsage(() => loadRubric(requireFile(io, values.rubric!, 'rubric file')))
   const problems = providerErrors(config, false, true)
   if (problems.length > 0) throw new UsageError(problems.join('\n'))

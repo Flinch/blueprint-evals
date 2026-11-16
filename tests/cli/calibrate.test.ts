@@ -183,5 +183,25 @@ describe('evals calibrate', () => {
       expect(await runCli([...base, '--split', 'dev', '--yes'], h.io)).toBe(2)
       expect(h.stderr()).toMatch(join('labels.jsonl') + ':1')
     })
+
+    it('exits 2 on a broken replace chain, before any model call', async () => {
+      const provider = labelJudgeProvider('agree')
+      const orphan = { ...dev[0]!, id: 'missing~r1', replaces: 'missing' }
+      const h = harness({ cwd: workspace({ 'labels.jsonl': toJsonl([...labels, orphan]) }), provider })
+      expect(await runCli([...base, '--split', 'dev', '--yes'], h.io)).toBe(2)
+      expect(h.stderr()).toMatch(/replaces "missing", which is not in the file/)
+      expect(provider.calls).toHaveLength(0)
+    })
+  })
+
+  it('judges each item once with its current label, and prints the agreement on the blind labels', async () => {
+    const changed = dev.filter(l => l.sampled_by === 'random').slice(0, 2)
+    const revisions = changed.map(l => ({ ...l, id: `${l.id}~r1`, replaces: l.id, verdict: l.verdict === 'pass' ? 'fail' as const : 'pass' as const }))
+    const provider = labelJudgeProvider('agree')
+    const h = harness({ cwd: workspace({ 'labels.jsonl': toJsonl([...labels, ...revisions]) }), provider })
+    expect(await runCli([...base, '--split', 'dev', '--yes'], h.io)).toBe(0)
+    expect(provider.calls).toHaveLength(randomIn(dev))
+    expect(h.stdout()).toMatch(/Changed after seeing the judge: 2 of these labels \(2 changed the verdict\)/)
+    expect(h.stdout()).toMatch(/On the original, blind labels: accuracy 100%/)
   })
 })

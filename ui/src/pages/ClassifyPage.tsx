@@ -13,6 +13,10 @@ import { readStored, writeStored } from '../lib/storage'
 // show the item's `reason` (a targeted reason hints that the judge failed the
 // run). The judge's answer comes from the reveal endpoint, which this page only
 // calls after the label is saved. See docs/design/0003-ui-and-api.md.
+//
+// A saved label can be changed later. The change is saved as a new line that
+// replaces the current one, and the first, blind label stays in the file. Every
+// change is treated as made after seeing the judge.
 
 export const LABELER_KEY = 'evals-ui-labeler'
 export const MAX_CRITIQUE = 20_000
@@ -39,7 +43,7 @@ export function validateLabel(v: { verdict: 'pass' | 'fail' | null; critique: st
   return errors
 }
 
-type Phase = 'edit' | 'saving' | 'saved' | 'revealing' | 'revealed'
+type Phase = 'edit' | 'saving' | 'saved' | 'revealing' | 'revealed' | 'revising'
 
 function isTypingTarget(el: EventTarget | null): boolean {
   return el instanceof HTMLElement && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT' || el.isContentEditable)
@@ -214,8 +218,20 @@ function ItemPicker({
 
 // ---------------------------------------------------------------- reveal view
 
+const verdictWord = (v: 'pass' | 'fail') => (v === 'pass' ? 'Pass' : 'Fail')
+
+/** One sentence about a label that was changed after the first save, or null when it never was. */
+export function revisionNote(reveal: Pick<RevealResponse, 'original' | 'human' | 'revisions'>): string | null {
+  const { original, human } = reveal
+  if (!original || reveal.revisions === 0) return null
+  return original.verdict !== human.verdict
+    ? `You changed this from ${verdictWord(original.verdict)} to ${verdictWord(human.verdict)} after seeing the judge.`
+    : `You changed your critique after seeing the judge. The verdict is still ${verdictWord(human.verdict)}.`
+}
+
 export function RevealView({ reveal }: { reveal: RevealResponse }) {
   const { judge, human } = reveal
+  const note = revisionNote(reveal)
   return (
     <div className="stack" aria-label="What the judge said">
       {judge === null ? (
@@ -253,8 +269,117 @@ export function RevealView({ reveal }: { reveal: RevealResponse }) {
           )}
         </div>
       </div>
+      {note && reveal.original ? (
+        <div className="crit-box" aria-label="Your first label">
+          <h4>Your first label, made blind</h4>
+          <div className="row" style={{ marginBottom: '0.4rem' }}><VerdictBadge verdict={reveal.original.verdict} /><span className="small muted">{shortDate(reveal.original.at)}</span></div>
+          {reveal.original.critique}
+          <p className="small muted" style={{ marginTop: '0.5rem', whiteSpace: 'normal' }} role="status">{note}</p>
+        </div>
+      ) : null}
       {reveal.runId ? <a href={runHref(reveal.runId)} className="small">Open the whole run</a> : null}
     </div>
+  )
+}
+
+// --------------------------------------------------------- changing a label
+
+/**
+ * Changes a saved label. Pre-filled with the current label. Saving appends a
+ * new line that replaces it, and the first, blind label stays in the file.
+ */
+export function ReviseForm({
+  itemId, current, idPrefix, onSaved, onCancel,
+}: {
+  itemId: string
+  current: Pick<Label, 'verdict' | 'critique' | 'labeler'>
+  /** Keeps element ids unique when more than one form can be on the page. */
+  idPrefix: string
+  onSaved(label: Label): void
+  onCancel(): void
+}) {
+  const [verdict, setVerdict] = useState<'pass' | 'fail' | null>(current.verdict)
+  const [critique, setCritique] = useState(current.critique)
+  const [labeler, setLabeler] = useState(() => readStored(LABELER_KEY) ?? current.labeler)
+  const [saving, setSaving] = useState(false)
+  const [problem, setProblem] = useState<string | null>(null)
+  const errors = validateLabel({ verdict, critique, labeler })
+  const unchanged = verdict === current.verdict && critique.trim() === current.critique.trim()
+  const valid = Object.keys(errors).length === 0 && !unchanged
+  const ids = { verdict: `${idPrefix}-verdict`, critique: `${idPrefix}-critique`, labeler: `${idPrefix}-labeler` }
+
+  const save = async () => {
+    if (!valid || verdict === null || saving) return
+    setSaving(true)
+    setProblem(null)
+    try {
+      const res = await api.revise(itemId, { verdict, critique: critique.trim(), labeler: labeler.trim() })
+      writeStored(LABELER_KEY, labeler.trim())
+      onSaved(res.label)
+    } catch (e) {
+      setSaving(false)
+      setProblem(describeError(e))
+    }
+  }
+
+  return (
+    <form
+      className="card-sm"
+      aria-label="Change the label"
+      onSubmit={e => {
+        e.preventDefault()
+        void save()
+      }}
+      onKeyDown={e => {
+        if (e.key === 'Escape' && !saving) {
+          e.preventDefault()
+          onCancel()
+        } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+          e.preventDefault()
+          void save()
+        }
+      }}
+      noValidate
+    >
+      <p className="small muted" style={{ marginBottom: '0.8rem' }}>
+        Your first label stays on file. The change is saved as a new version, marked as made after seeing the judge.
+      </p>
+      <div className="form-group">
+        <div className="form-label" id={ids.verdict}>Your verdict</div>
+        <div className="verdict-toggle" role="group" aria-labelledby={ids.verdict}>
+          <button type="button" className="btn btn-success" aria-pressed={verdict === 'pass'} onClick={() => setVerdict('pass')}>Pass</button>
+          <button type="button" className="btn btn-danger btn-fail" aria-pressed={verdict === 'fail'} onClick={() => setVerdict('fail')}>Fail</button>
+        </div>
+      </div>
+      <div className="form-group">
+        <label className="form-label" htmlFor={ids.critique}>Critique (required)</label>
+        <textarea
+          id={ids.critique}
+          className="form-textarea"
+          autoFocus
+          value={critique}
+          maxLength={MAX_CRITIQUE}
+          aria-required="true"
+          aria-invalid={errors.critique ? true : undefined}
+          onChange={e => setCritique(e.target.value)}
+        />
+        {errors.critique ? <div className="form-error" role="alert">{errors.critique}</div> : <div className="form-hint">Say what changed your mind, so the reason is on file too.</div>}
+      </div>
+      <div className="form-group" style={{ maxWidth: 320 }}>
+        <label className="form-label" htmlFor={ids.labeler}>Your name</label>
+        <input id={ids.labeler} className="form-input" value={labeler} maxLength={MAX_LABELER} autoComplete="name" aria-invalid={errors.labeler ? true : undefined} onChange={e => setLabeler(e.target.value)} />
+        {errors.labeler ? <div className="form-error" role="alert">{errors.labeler}</div> : null}
+      </div>
+      {problem ? <div style={{ marginBottom: '0.8rem' }}><Banner kind="danger" role="alert">{problem}</Banner></div> : null}
+      <div className="row">
+        <button type="submit" className="btn btn-primary" disabled={!valid || saving}>
+          {saving ? <span className="spinner" aria-hidden="true" /> : null}
+          Save the change
+        </button>
+        <button type="button" className="btn btn-ghost" onClick={onCancel} disabled={saving}>Cancel</button>
+        {unchanged ? <span className="small muted">Change the verdict or the critique to save.</span> : null}
+      </div>
+    </form>
   )
 }
 
@@ -403,6 +528,25 @@ export function QueueView({ itemId }: { itemId?: string } = {}) {
     }
   }, [current, phase])
 
+  // Changing the label is offered only once the judge has been revealed, so a change is always on a saved label.
+  const startRevise = useCallback(() => {
+    if (phase === 'revealed' && saved) setPhase('revising')
+  }, [phase, saved])
+
+  const onRevised = async (label: Label) => {
+    if (!current) return
+    setSaved(label)
+    setProblem(null)
+    setPhase('revealing')
+    refreshStats()
+    try {
+      setReveal(await api.reveal(current.itemId))
+    } catch (e) {
+      setProblem(`The change is saved, but the comparison could not be refreshed: ${describeError(e)}`)
+    }
+    setPhase('revealed')
+  }
+
   // Keyboard shortcuts. Plain keys are ignored while typing or when a button has focus; Ctrl/Cmd+Enter submits from anywhere.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -430,12 +574,15 @@ export function QueueView({ itemId }: { itemId?: string } = {}) {
         else if (key === 'enter' && !isActivatable(e.target)) void submit()
       } else if (phase === 'saved' || phase === 'revealed') {
         if (key === 'r' && phase === 'saved') void doReveal()
-        else if (key === 'n' || (key === 'enter' && !isActivatable(e.target))) next()
+        else if (key === 'e' && phase === 'revealed') {
+          e.preventDefault()
+          startRevise()
+        } else if (key === 'n' || (key === 'enter' && !isActivatable(e.target))) next()
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [phase, submit, skip, doReveal, next])
+  }, [phase, submit, skip, doReveal, next, startRevise])
 
   const hint = useMemo(
     () =>
@@ -444,12 +591,20 @@ export function QueueView({ itemId }: { itemId?: string } = {}) {
           <span className="kbd">P</span> pass &middot; <span className="kbd">F</span> fail &middot; <span className="kbd">N</span> skip &middot; <span className="kbd">Enter</span> submit
           &middot; <span className="kbd">Ctrl</span>+<span className="kbd">Enter</span> submits while typing
         </>
+      ) : phase === 'revising' ? (
+        <>
+          <span className="kbd">Esc</span> cancel the change &middot; <span className="kbd">Ctrl</span>+<span className="kbd">Enter</span> saves while typing
+        </>
+      ) : phase === 'revealed' || (phase === 'revealing' && reveal) ? (
+        <>
+          <span className="kbd">E</span> change my label &middot; <span className="kbd">N</span> or <span className="kbd">Enter</span> next item
+        </>
       ) : (
         <>
           <span className="kbd">R</span> reveal the judge &middot; <span className="kbd">N</span> or <span className="kbd">Enter</span> next item
         </>
       ),
-    [phase],
+    [phase, reveal],
   )
 
   if (queue.loading && !queue.data) return <Loading label="Loading the review queue" />
@@ -589,13 +744,32 @@ export function QueueView({ itemId }: { itemId?: string } = {}) {
               </form>
             ) : (
               <div className="review-section stack" aria-label="After saving">
-                <Banner kind="success" title="Label saved." role="status">
-                  You said <strong>{saved?.verdict}</strong>. The server recorded it as a {saved?.sampled_by} sample.
-                </Banner>
+                {saved?.replaces ? (
+                  <Banner kind="success" title="Label changed." role="status">
+                    You now say <strong>{saved.verdict}</strong>. Your first, blind label is kept on file.
+                  </Banner>
+                ) : (
+                  <Banner kind="success" title="Label saved." role="status">
+                    You said <strong>{saved?.verdict}</strong>. The server recorded it as a {saved?.sampled_by} sample.
+                  </Banner>
+                )}
                 <div className="crit-box"><h4>Your critique</h4>{saved?.critique}</div>
                 {problem ? <Banner kind="danger" role="alert">{problem}</Banner> : null}
-                {phase === 'revealed' && reveal ? (
-                  <RevealView reveal={reveal} />
+                {reveal ? (
+                  <>
+                    <RevealView reveal={reveal} />
+                    {phase === 'revising' && saved ? (
+                      <ReviseForm itemId={current.itemId} current={saved} idPrefix="revise-current" onSaved={onRevised} onCancel={() => setPhase('revealed')} />
+                    ) : (
+                      <div>
+                        <button type="button" className="btn btn-ghost" onClick={startRevise} disabled={phase !== 'revealed'}>
+                          {phase === 'revealing' ? <span className="spinner" aria-hidden="true" /> : null}
+                          Change my label (E)
+                        </button>
+                        <p className="small muted" style={{ marginTop: '0.4rem' }}>Your first label stays on file, and the change is marked as made after seeing the judge.</p>
+                      </div>
+                    )}
+                  </>
                 ) : (
                   <div>
                     <button type="button" className="btn btn-primary" onClick={doReveal} disabled={phase === 'revealing'}>
@@ -619,16 +793,24 @@ export function QueueView({ itemId }: { itemId?: string } = {}) {
 
 // -------------------------------------------------------------- labels screen
 
+/** The item a label is about: a changed label's id ends in `~r<n>`. */
+export function itemIdOf(label: Pick<Label, 'id' | 'replaces'>): string {
+  return label.replaces === undefined ? label.id : label.id.replace(/~r\d+$/, '')
+}
+
 export function LabelsView() {
   const labels = useAsync(() => api.labels(), [])
   const [verdict, setVerdict] = useState('')
   const [sampled, setSampled] = useState('')
   const [labeler, setLabeler] = useState('')
   const [search, setSearch] = useState('')
+  // Keyed by item id, which stays the same when a label is changed.
   const [open, setOpen] = useState<string | null>(null)
+  const [revising, setRevising] = useState<string | null>(null)
   const [reveals, setReveals] = useState<Record<string, RevealResponse | string>>({})
 
   const all = labels.data?.labels ?? []
+  const history = labels.data?.history ?? {}
   const rows = useMemo(() => {
     const words = search.trim().toLowerCase().split(/\s+/).filter(Boolean)
     return all
@@ -640,13 +822,20 @@ export function LabelsView() {
       .sort((a, b) => b.at.localeCompare(a.at))
   }, [all, verdict, sampled, labeler, search])
 
-  const doReveal = async (id: string) => {
+  const doReveal = async (itemId: string) => {
     try {
-      const r = await api.reveal(id)
-      setReveals(prev => ({ ...prev, [id]: r }))
+      const r = await api.reveal(itemId)
+      setReveals(prev => ({ ...prev, [itemId]: r }))
     } catch (e) {
-      setReveals(prev => ({ ...prev, [id]: describeError(e) }))
+      setReveals(prev => ({ ...prev, [itemId]: describeError(e) }))
     }
+  }
+
+  const onRevised = (itemId: string) => {
+    setRevising(null)
+    labels.reload()
+    // A comparison already on screen is fetched again, so it shows the new label.
+    if (reveals[itemId] !== undefined) void doReveal(itemId)
   }
 
   if (labels.loading && !labels.data) return <Loading label="Loading labels" />
@@ -657,7 +846,11 @@ export function LabelsView() {
   return (
     <div className="stack">
       <div className="stats-row" style={{ marginBottom: 0 }}>
-        <div className="stat-card"><div className="stat-num">{stats.total}</div><div className="stat-label">Labels</div></div>
+        <div className="stat-card">
+          <div className="stat-num">{stats.total}</div>
+          <div className="stat-label">Labels</div>
+          {stats.revisions > 0 ? <div className="stat-sub">{stats.revisions} changed after the first label</div> : null}
+        </div>
         <div className="stat-card"><div className="stat-num">{stats.byVerdict.pass} / {stats.byVerdict.fail}</div><div className="stat-label">Pass / fail</div></div>
         <div className="stat-card">
           <div className="stat-num">{percent(stats.randomShare)}</div>
@@ -712,17 +905,25 @@ export function LabelsView() {
                 <thead><tr><th>Verdict</th><th>Criterion</th><th>Sampled</th><th>Labeler</th><th>When</th><th><span className="sr-only">Details</span></th></tr></thead>
                 <tbody>
                   {rows.map(l => {
-                    const isOpen = open === l.id
-                    const rv = reveals[l.id]
+                    const itemId = itemIdOf(l)
+                    const isOpen = open === itemId
+                    const rv = reveals[itemId]
+                    const earlier = history[itemId] ?? []
+                    const first = earlier[0]
                     return (
-                      <Fragment key={l.id}>
+                      <Fragment key={itemId}>
                         <tr>
-                          <td><VerdictBadge verdict={l.verdict} /></td>
-                          <td><div className="mono small break">{l.criterion}</div><div className="small muted break">{l.id}</div></td>
+                          <td>
+                            <div className="row" style={{ gap: '0.4rem' }}>
+                              <VerdictBadge verdict={l.verdict} />
+                              {first ? <span className="badge badge-accent" title="Changed after the first label">Revised</span> : null}
+                            </div>
+                          </td>
+                          <td><div className="mono small break">{l.criterion}</div><div className="small muted break">{itemId}</div></td>
                           <td className="small">{l.sampled_by}</td>
                           <td className="small">{l.labeler}</td>
                           <td className="small">{shortDate(l.at)}</td>
-                          <td><button type="button" className="btn btn-ghost btn-sm" aria-expanded={isOpen} onClick={() => setOpen(isOpen ? null : l.id)}>{isOpen ? 'Hide' : 'Details'}</button></td>
+                          <td><button type="button" className="btn btn-ghost btn-sm" aria-expanded={isOpen} onClick={() => setOpen(isOpen ? null : itemId)}>{isOpen ? 'Hide' : 'Details'}</button></td>
                         </tr>
                         {isOpen ? (
                           <tr>
@@ -731,13 +932,28 @@ export function LabelsView() {
                                 {l.input ? <div className="crit-box"><h4>Input</h4>{l.input}</div> : null}
                                 <div className="crit-box"><h4>Output</h4>{l.output}</div>
                                 <div className="crit-box"><h4>Critique by {l.labeler}</h4>{l.critique}</div>
+                                {first ? (
+                                  <div className="crit-box">
+                                    <h4>First label, made blind, by {first.labeler}</h4>
+                                    <div className="row" style={{ marginBottom: '0.4rem' }}><VerdictBadge verdict={first.verdict} /><span className="small muted">{shortDate(first.at)}</span></div>
+                                    {first.critique}
+                                    <p className="small muted" style={{ marginTop: '0.5rem', whiteSpace: 'normal' }}>Changed {plural(earlier.length, 'time')} since.</p>
+                                  </div>
+                                ) : null}
                                 {l.group ? <div className="small muted">Group: <span className="mono">{l.group}</span></div> : null}
+                                {revising === itemId ? (
+                                  <ReviseForm itemId={itemId} current={l} idPrefix="revise-list" onSaved={() => onRevised(itemId)} onCancel={() => setRevising(null)} />
+                                ) : null}
                                 {rv === undefined ? (
-                                  <div><button type="button" className="btn btn-ghost btn-sm" onClick={() => doReveal(l.id)}>Reveal what the judge said</button></div>
-                                ) : typeof rv === 'string' ? (
-                                  <Banner kind="info">{rv}</Banner>
+                                  <div className="row">
+                                    <button type="button" className="btn btn-ghost btn-sm" onClick={() => doReveal(itemId)}>Reveal what the judge said</button>
+                                    {revising === itemId ? null : <button type="button" className="btn btn-ghost btn-sm" onClick={() => setRevising(itemId)}>Change label</button>}
+                                  </div>
                                 ) : (
-                                  <RevealView reveal={rv} />
+                                  <>
+                                    {typeof rv === 'string' ? <Banner kind="info">{rv}</Banner> : <RevealView reveal={rv} />}
+                                    {revising === itemId ? null : <div><button type="button" className="btn btn-ghost btn-sm" onClick={() => setRevising(itemId)}>Change label</button></div>}
+                                  </>
                                 )}
                               </div>
                             </td>

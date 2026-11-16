@@ -49,8 +49,9 @@ export type ErrorCode =
   | 'duplicate_label' //         409
   | 'item_not_found' //          404: no such queue item
   | 'item_not_in_queue' //       422: the item exists but is not up for review (an unsampled pass)
-  | 'not_labelled' //            403: reveal before the item has a human label
+  | 'not_labelled' //            403: reveal before the item has a human label. 404 from revise: no label to change
   | 'not_revealable' //          404: the label is not for a queue item, or its run is gone
+  | 'no_change' //               422: a revision with the same verdict and critique as the current label
   | 'corrupt_record' //          422: a saved file could not be read
   | 'store_unwritable' //        500: the .evals directory could not be written
   | 'internal' //               500
@@ -384,13 +385,28 @@ export interface LabelRequest {
   critique: string
 }
 
+/**
+ * The body of POST /api/labels/:id/revise, where `:id` is the item id. A
+ * revision is a new line that replaces the current label. The blind label stays
+ * in the file.
+ */
+export interface ReviseRequest {
+  labeler: string
+  verdict: 'pass' | 'fail'
+  /** Required, as on every label. */
+  critique: string
+}
+
 export interface LabelResponse {
   label: Label
 }
 
 export interface LabelsResponse {
   file: string
+  /** The current label of each item. A changed label appears once, as its latest version. */
   labels: Label[]
+  /** For each item whose label was changed, keyed by item id: the superseded versions, oldest first (the blind label first). */
+  history: Record<string, Label[]>
   stats: LabelStats
 }
 

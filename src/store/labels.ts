@@ -2,7 +2,9 @@ import { createHash } from 'node:crypto'
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { z } from 'zod'
-import { checkLabels, LabelSchema, MIN_RANDOM_SHARE, parseLabels, splitOf, type Label, type Split } from '../calibration/labels.js'
+import {
+  checkLabels, itemIdOfLabel, LabelChainError, LabelSchema, MIN_RANDOM_SHARE, parseLabels, resolveLabels, splitOf, type Label, type Split,
+} from '../calibration/labels.js'
 import { isApplicable } from '../core/aggregate.js'
 import type { CriterionResult, CriterionVerdict, RunResult } from '../core/interfaces.js'
 import type { Turn } from '../core/trace.js'
@@ -24,6 +26,10 @@ import type { SuiteRecord } from './suites.js'
 //     something that never happened. Such criteria are counted in the stats.
 //  3. A random quota. At least MIN_RANDOM_SHARE of all labels are randomly
 //     sampled, because only random labels can estimate the judge's accuracy.
+//
+// The label file may hold revisions (a person changed a label after seeing the
+// judge). Everything here counts items, using the current label of each, so a
+// revision never changes the queue, the stats' totals or the quota.
 
 // ----------------------------------------------------------- the label file
 
@@ -41,7 +47,7 @@ export class DuplicateLabelError extends Error {
   }
 }
 
-/** The labels in a file. A missing file is an empty list. A file that does not parse throws, naming the line. */
+/** Every line of a label file, revisions included. A missing file is an empty list. A file that does not parse throws, naming the line. */
 export function listLabels(file: string): Label[] {
   if (!existsSync(file)) return []
   return parseLabels(readFileSync(file, 'utf8'), file)
@@ -51,7 +57,8 @@ export function listLabels(file: string): Label[] {
  * Appends one label. The file is only ever appended to: nothing already in it is
  * rewritten. The label is checked with the same schema the calibration reads
  * with, so a line this writes is a line `evals calibrate` accepts. A `split`
- * field is refused (it is derived, never stored) and so is a duplicate id.
+ * field is refused (it is derived, never stored) and so is a duplicate id. A
+ * revision (`replaces`) must extend a chain cleanly, as `resolveLabels` checks.
  * `at` defaults to now.
  */
 export function appendLabel(file: string, input: unknown, now: Date = new Date()): Label {
@@ -65,13 +72,23 @@ export function appendLabel(file: string, input: unknown, now: Date = new Date()
   const label = parsed.data
 
   const text = existsSync(file) ? readFileSync(file, 'utf8') : ''
-  if (parseLabels(text, file).some(l => l.id === label.id)) throw new DuplicateLabelError(label.id)
+  const existing = parseLabels(text, file)
+  if (existing.some(l => l.id === label.id)) throw new DuplicateLabelError(label.id)
+  if (label.replaces !== undefined) {
+    try {
+      resolveLabels([...existing, label])
+    } catch (e) {
+      if (e instanceof LabelChainError) throw new LabelValidationError(e.message)
+      throw e
+    }
+  }
 
   mkdirSync(dirname(file), { recursive: true })
   appendFileSync(file, `${text !== '' && !text.endsWith('\n') ? '\n' : ''}${JSON.stringify(label)}\n`)
   return label
 }
 
+/** Counts are of items: a revised item counts once, with its current label. */
 export interface LabelStats {
   total: number
   random: number
@@ -82,11 +99,15 @@ export interface LabelStats {
   byVerdict: { pass: number; fail: number }
   bySplit: Record<Split, number>
   labelers: string[]
+  /** Items whose label was changed after it was first saved. */
+  revisions: number
   /** The sanity checks `evals validate` runs on a label file. */
   warnings: string[]
 }
 
-export function labelStats(labels: Label[]): LabelStats {
+/** Stats for every line of a label file. Throws LabelChainError for a broken replace chain. */
+export function labelStats(all: Label[]): LabelStats {
+  const { current: labels, revised } = resolveLabels(all)
   const random = labels.filter(l => l.sampled_by === 'random').length
   const bySplit: Record<Split, number> = { train: 0, dev: 0, test: 0 }
   for (const l of labels) bySplit[splitOf(l)]++
@@ -99,7 +120,8 @@ export function labelStats(labels: Label[]): LabelStats {
     byVerdict: { pass: labels.filter(l => l.verdict === 'pass').length, fail: labels.filter(l => l.verdict === 'fail').length },
     bySplit,
     labelers: [...new Set(labels.map(l => l.labeler))].sort(),
-    warnings: checkLabels(labels),
+    revisions: revised.size,
+    warnings: checkLabels(all),
   }
 }
 
@@ -156,6 +178,7 @@ export const DEFAULT_QUEUE_SEED = 'blueprint-evals-review-queue-v1'
 
 export interface QueueOptions {
   suites: SuiteRecord[]
+  /** Every line of the label file. Revisions are resolved here, so an item counts once. */
   labels: Label[]
   rubricFor?: RubricLookup
   /** Page size. Default 25. */
@@ -306,9 +329,10 @@ interface Plan {
 function plan(options: QueueOptions): Plan {
   const seed = options.seed ?? DEFAULT_QUEUE_SEED
   const share = options.minRandomShare ?? MIN_RANDOM_SHARE
-  const labelledIds = new Set(options.labels.map(l => l.id))
-  const labelled = options.labels.length
-  const labelledRandom = options.labels.filter(l => l.sampled_by === 'random').length
+  const { current } = resolveLabels(options.labels)
+  const labelledIds = new Set(current.map(itemIdOfLabel))
+  const labelled = current.length
+  const labelledRandom = current.filter(l => l.sampled_by === 'random').length
 
   const seen = new Set<string>()
   const skippedNa = new Set<string>()
@@ -405,6 +429,7 @@ export function findQueueItem(options: QueueOptions, itemId: string): FoundItem 
 // ------------------------------------------------------------------ reveal
 
 export interface Reveal {
+  /** The id of the current label line: the item id, or `<itemId>~r<n>` once the label was changed. */
   labelId: string
   runId: string
   suiteId: string | null
@@ -412,23 +437,33 @@ export interface Reveal {
   judge: { verdict: CriterionVerdict; critique: string; critical: boolean; grader: string } | null
   /** Why the run errored, when it did. */
   runError: string | null
+  /** The person's current label for the item. */
   human: { verdict: Label['verdict']; critique: string; labeler: string; at: string }
-  /** Null when there is no judge verdict to compare with, which includes a judge that found the criterion not applicable. */
+  /** Whether the judge agrees with the current label. Null when there is no judge verdict to compare with, which includes a judge that found the criterion not applicable. */
   agrees: boolean | null
+  /** The first, blind label, when the label was changed later. Null when it never was. */
+  original: { verdict: Label['verdict']; critique: string; at: string } | null
+  /** How many times the label was changed. */
+  revisions: number
+  /** Whether the judge agrees with the blind label. Null when `agrees` is. Equal to `agrees` when the label was never changed. */
+  blindAgrees: boolean | null
 }
 
 export type RunLookup = (runId: string) => { suiteId: string; result: RunResult } | null
 
 /**
  * The judge's verdict and critique for an item that has a human label. The
- * caller passes the label, so an item that was never labelled cannot be
- * revealed. Null when the label's id is not a queue item id or its run is gone.
+ * caller passes the current label and, for a changed label, the versions it
+ * superseded (oldest first, so the blind label comes first), so an item that
+ * was never labelled cannot be revealed. Null when the item id is not a queue
+ * item id or its run is gone.
  */
-export function revealItem(label: Label, findRun: RunLookup): Reveal | null {
-  const split = label.id.indexOf(':')
+export function revealItem(label: Label, findRun: RunLookup, history: Label[] = []): Reveal | null {
+  const itemId = itemIdOfLabel(label)
+  const split = itemId.indexOf(':')
   if (split <= 0) return null
-  const runId = label.id.slice(0, split)
-  const criterionId = label.id.slice(split + 1)
+  const runId = itemId.slice(0, split)
+  const criterionId = itemId.slice(split + 1)
   const found = findRun(runId)
   if (!found) return null
 
@@ -437,6 +472,8 @@ export function revealItem(label: Label, findRun: RunLookup): Reveal | null {
     const c = (g.status === 'pass' || g.status === 'fail' ? g.criteria ?? [] : []).find(x => x.id === criterionId)
     if (c) judge = { verdict: c.verdict, critique: c.critique, critical: c.critical, grader: g.grader }
   }
+  const graded = judge && judge.verdict !== 'not_applicable' ? judge.verdict : null
+  const blind = history[0] ?? label
   return {
     labelId: label.id,
     runId,
@@ -444,6 +481,9 @@ export function revealItem(label: Label, findRun: RunLookup): Reveal | null {
     judge,
     runError: found.result.error ?? null,
     human: { verdict: label.verdict, critique: label.critique, labeler: label.labeler, at: label.at },
-    agrees: judge && judge.verdict !== 'not_applicable' ? judge.verdict === label.verdict : null,
+    agrees: graded === null ? null : graded === label.verdict,
+    original: history[0] ? { verdict: blind.verdict, critique: blind.critique, at: blind.at } : null,
+    revisions: history.length,
+    blindAgrees: graded === null ? null : graded === blind.verdict,
   }
 }

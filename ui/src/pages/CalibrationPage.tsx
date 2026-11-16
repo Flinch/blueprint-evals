@@ -61,6 +61,28 @@ function HowToRead() {
   )
 }
 
+/**
+ * Labels changed after the judge's answer was available may have drifted toward
+ * it, so the agreement on the original, blind labels is shown next to the
+ * headline numbers. Reports saved before revisions existed have no block.
+ */
+function RevisionNote({ report }: { report: CalibrationReport }) {
+  const rv = report.revisions
+  if (!rv || rv.revised === 0 || !rv.blindMetrics) return null
+  const b = rv.blindMetrics
+  return (
+    <section className="card-sm" aria-label="Labels changed after seeing the judge">
+      <p className="small" data-testid="revision-note">
+        {rv.revised === 1 ? '1 of these labels was' : `${rv.revised} of these labels were`} changed after seeing the judge
+        {rv.verdictChanged !== rv.revised ? ` (${rv.verdictChanged} changed the verdict)` : ''}. Agreement on your original, blind labels: {percent(b.accuracy)}, against {percent(report.metrics.accuracy)} with the changes.
+      </p>
+      <p className="small muted">
+        On the blind labels the true negative rate is {percent(b.tnr.rate)} and the true positive rate is {percent(b.tpr.rate)}. When agreement is higher with the changes, the changes moved toward the judge, so read the blind numbers as the safer estimate. Many changes toward the judge can also mean the rubric wording is unclear.
+      </p>
+    </section>
+  )
+}
+
 export function CalibrationReportView({ record }: { record: CalibrationRecord }) {
   const r = record.report
   const m = r.metrics
@@ -86,6 +108,7 @@ export function CalibrationReportView({ record }: { record: CalibrationRecord })
         <Banner kind="success">The sample size is adequate by the 30 per class and 60 in total rule of thumb.</Banner>
       )}
       <Warnings items={r.warnings} title="Warnings from this measurement" />
+      <RevisionNote report={r} />
 
       <div className="cols-2">
         <RateBlock

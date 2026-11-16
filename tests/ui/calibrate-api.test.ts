@@ -99,6 +99,39 @@ describe('calibration through the API', () => {
     expect((await f.api.get('/api/run/status')).json().activeJob).toBeNull()
   })
 
+  it('measures the current labels, reports the blind ones too, and needs a new preview after a revision', async () => {
+    // The fake judge agrees with every blind label. Four random dev labels are then changed to the opposite verdict.
+    const changed = dev.filter(l => l.sampled_by === 'random').slice(0, 4)
+    const revisions = changed.map(l => ({ ...l, id: `${l.id}~r1`, replaces: l.id, verdict: l.verdict === 'pass' ? 'fail' as const : 'pass' as const, critique: 'Changed after the reveal.' }))
+    const { f, provider } = await calibrationFixture({ labelText: toJsonl([...labels, ...revisions]) })
+    const preview = (await f.api.post('/api/calibrate/preview', req)).json<CalibratePreviewResponse>()
+    // One judgement per item, never one per line.
+    expect(preview.preview.judgements!.count).toBe(randomInDev)
+    const { record } = (await f.api.post('/api/calibrate/start', { ...req, previewToken: preview.previewToken, confirm: true })).json<CalibrateStartResponse>()
+    expect(provider.calls).toHaveLength(randomInDev)
+    const r = record.report
+    expect(r.metrics.n).toBe(randomInDev)
+    expect(r.disagreements.map(d => d.id).sort()).toEqual(changed.map(l => l.id).sort())
+    expect(r.metrics.accuracy).toBeCloseTo((randomInDev - 4) / randomInDev)
+    expect(r.revisions).toMatchObject({ revised: 4, verdictChanged: 4 })
+    expect(r.revisions!.blindMetrics!.accuracy).toBe(1)
+
+    // A further revision changes the current labels, so the old token no longer covers the plan.
+    const { previewToken } = (await f.api.post('/api/calibrate/preview', req)).json<CalibratePreviewResponse>()
+    const again = { ...revisions[0]!, id: `${changed[0]!.id}~r2`, replaces: `${changed[0]!.id}~r1`, verdict: changed[0]!.verdict }
+    writeFileSync(join(f.workdir, '.evals', 'labels.jsonl'), toJsonl([...labels, ...revisions, again]))
+    expect((await f.api.post('/api/calibrate/start', { ...req, previewToken, confirm: true })).status).toBe(412)
+  })
+
+  it('refuses a label file with a broken replace chain', async () => {
+    const orphan = { ...dev[0]!, id: 'missing~r1', replaces: 'missing' }
+    const { f, provider } = await calibrationFixture({ labelText: toJsonl([...labels, orphan]) })
+    const r = await f.api.post('/api/calibrate/preview', req)
+    expect(r.status).toBe(422)
+    expect(r.json().error).toMatchObject({ code: 'corrupt_record', message: expect.stringMatching(/replaces "missing", which is not in the file/) })
+    expect(provider.calls).toHaveLength(0)
+  })
+
   it('reports a judge that disagrees, without failing', async () => {
     const { f } = await calibrationFixture({ provider: labelJudgeProvider('always-pass') })
     const { previewToken } = (await f.api.post('/api/calibrate/preview', req)).json<CalibratePreviewResponse>()
