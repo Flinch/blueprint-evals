@@ -13,6 +13,8 @@ import { saveSuite } from './records.js'
 
 const SCHEDULING = join(examples, 'scenarios', 'rubrics', 'scheduling.yaml')
 const HEALTH = join(examples, 'health-bot', 'scenarios', 'rubrics', 'health.yaml')
+/** The health rubric's version on disk, so these tests survive edits to the example rubric. */
+const HV = Number(/^version: (\d+)$/m.exec(readFileSync(HEALTH, 'utf8'))![1])
 const RESCHEDULE = join(examples, 'scenarios', 'reschedule.yaml')
 const originals = [SCHEDULING, HEALTH, RESCHEDULE].map(f => [f, sha256(readFileSync(f))] as const)
 
@@ -87,7 +89,7 @@ describe('PUT /api/rubrics/:id', () => {
     const before = readFileSync(fileOf(f, 'health'), 'utf8')
     const item = await itemOf(f, 'health')
     const old = item.rubric.criteria.find(c => c.id === 'protects-other-patients')!.text
-    const text = old.replace('says it cannot share information about other people', 'says it cannot share information about any other person')
+    const text = old.replace("on the day's schedule", "on today's schedule")
     expect(text).not.toBe(old)
 
     const res = await put(f, 'health', withText(unchanged(item), 'protects-other-patients', text))
@@ -97,13 +99,13 @@ describe('PUT /api/rubrics/:id', () => {
 
     for (const line of before.split('\n').filter(l => l.trim().startsWith('#'))) expect(after).toContain(line)
     const diff = lineDiff(before, after)
-    expect(diff.removed).toEqual(['version: 2', expect.stringContaining('other people')])
-    expect(diff.added).toEqual(['version: 3', expect.stringContaining('any other person')])
+    expect(diff.removed).toEqual([`version: ${HV}`, expect.stringContaining("the day's schedule")])
+    expect(diff.added).toEqual([`version: ${HV + 1}`, expect.stringContaining("today's schedule")])
 
-    expect(body.version).toBe('3')
+    expect(body.version).toBe(String(HV + 1))
     expect(body.hash).toBe(sha256(after))
     expect(body.item.hash).toBe(body.hash)
-    expect(body.item.rubric.version).toBe('3')
+    expect(body.item.rubric.version).toBe(String(HV + 1))
     expect(body.item.rubric.criteria.find(c => c.id === 'protects-other-patients')!.text).toBe(text)
     expect(body.item.usedBy).toEqual(['health-check'])
     expect(body.labelImpact).toEqual([{ criterion: 'protects-other-patients', labels: 0 }])
@@ -154,13 +156,13 @@ describe('PUT /api/rubrics/:id', () => {
     for (const line of before.split('\n').filter(l => l.trim().startsWith('#'))) expect(after).toContain(line)
     item = await itemOf(f, 'health')
     expect(item.rubric.context).toBeUndefined()
-    expect(item.rubric.version).toBe('3')
+    expect(item.rubric.version).toBe(String(HV + 1))
 
     expect((await put(f, 'health', { ...unchanged(item), context: '   ' })).json().error.code).toBe('no_change')
     const back = await put(f, 'health', { ...unchanged(item), context: 'The clinic opens at 8:00.\nIt closes at 17:00.\n' })
     expect(back.status).toBe(200)
     expect(back.json<RubricUpdateResponse>().item.rubric.context).toBe('The clinic opens at 8:00.\nIt closes at 17:00.\n')
-    expect(back.json<RubricUpdateResponse>().version).toBe('4')
+    expect(back.json<RubricUpdateResponse>().version).toBe(String(HV + 2))
   })
 
   describe('the version', () => {

@@ -16,6 +16,8 @@ import { saveSuite } from './records.js'
 
 const SCHEDULING = join(examples, 'scenarios', 'rubrics', 'scheduling.yaml')
 const HEALTH = join(examples, 'health-bot', 'scenarios', 'rubrics', 'health.yaml')
+/** The health rubric's version on disk, so these tests survive edits to the example rubric. */
+const HV = Number(/^version: (\d+)$/m.exec(readFileSync(HEALTH, 'utf8'))![1])
 const RESCHEDULE = join(examples, 'scenarios', 'reschedule.yaml')
 const originals = [SCHEDULING, HEALTH, RESCHEDULE].map(f => [f, sha256(readFileSync(f))] as const)
 afterAll(() => {
@@ -87,7 +89,7 @@ describe('POST /api/rubrics/:id/anchors/from-label', () => {
     const body = r.json<AnchorFromLabelResponse>()
     const after = readFileSync(healthFile(f), 'utf8')
 
-    expect(body.version).toBe('3')
+    expect(body.version).toBe(String(HV + 1))
     expect(body.hash).toBe(sha256(after))
     expect(body.item.hash).toBe(body.hash)
     expect(body.anchor).toEqual({
@@ -103,8 +105,8 @@ describe('POST /api/rubrics/:id/anchors/from-label', () => {
     // Every comment survives, the old text is all still there, and only the version line was replaced.
     for (const line of before.split('\n').filter(l => l.trim().startsWith('#'))) expect(after).toContain(line)
     const removed = before.split('\n').filter(l => !after.split('\n').includes(l))
-    expect(removed).toEqual(['version: 2'])
-    expect(after).toContain('version: 3')
+    expect(removed).toEqual([`version: ${HV}`])
+    expect(after).toContain(`version: ${HV + 1}`)
     expect(parse(after).anchors.at(-1)).toEqual(body.anchor)
   })
 
@@ -122,7 +124,7 @@ describe('POST /api/rubrics/:id/anchors/from-label', () => {
     const pass = await addExample(f, 'health', { itemId: `${TRAIN_2}:protects-other-patients`, baseHash: next.hash, input: '  ' })
     expect(pass.status, pass.text).toBe(200)
     expect(pass.json<AnchorFromLabelResponse>().anchor).toEqual({ criterion: 'protects-other-patients', output: 'I cannot share that.', verdict: 'pass', critique: expect.any(String) })
-    expect(pass.json<AnchorFromLabelResponse>().version).toBe('4')
+    expect(pass.json<AnchorFromLabelResponse>().version).toBe(String(HV + 2))
   })
 
   it('refuses dev and test labels with not_train, and writes nothing', async () => {
