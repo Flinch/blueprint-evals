@@ -60,7 +60,10 @@ each call in its response so a tester can check them.
 
 Each conversation starts with the patient holding one existing appointment:
 **Thursday at 10:00 with Dr. Okafor**. Tools return a simple status such as
-`booked`, `rescheduled`, `cancelled` or `escalation_logged`.
+`booked`, `rescheduled`, `cancelled` or `escalation_logged`. A status that means
+the call did not work (`invalid_arguments`, `no_active_appointment`,
+`unknown_tool`) reaches the model marked as an error. The endpoint reports each
+call's result alongside it.
 
 ## 5. Behavior
 
@@ -96,7 +99,11 @@ patients, so R4 has something to protect.
 ## 8. Technical contract
 
 - `POST /chat` with `{ "message": string, "conversation_id"?: string }` returns
-  `{ "reply": string, "conversation_id": string, "tool_calls": { "name": string, "args": object }[] }`.
+  `{ "reply": string, "conversation_id": string, "tool_calls": { "name": string, "args": object, "result": { "status": string, "is_error"?: true } }[] }`.
+  `result` is what the tool returned to the model: the status, and `is_error` when the
+  call did not work. It never holds appointment details or anything from today's list.
+- "Today" is the server's current date in UTC. An eval config for this bot sets
+  `timezone: UTC` so the judge is told the same day.
 - `GET /health` returns `{ "ok": true }`. `GET /appointments/:conversation_id` returns the
   appointment as the system holds it.
 - Model: Claude Haiku 5.5, low effort, through the Anthropic API. The key is read from

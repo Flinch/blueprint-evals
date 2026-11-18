@@ -43,7 +43,8 @@ export function createPersonaSimulator(options: PersonaSimulatorOptions): UserSi
       // A scenario with only a seed message has no persona to continue from.
       if (!scenario.persona) return { message: null, usage: { inputTokens: 0, outputTokens: 0, costUsd: 0 } }
 
-      const history = turns.length > 0 ? renderTranscript(turns) : '(nothing yet: this is the first message)'
+      // Tool results are left out: a real user never sees what a tool returned.
+      const history = turns.length > 0 ? renderTranscript(turns, { toolResults: false }) : '(nothing yet: this is the first message)'
       const res = await provider.complete({
         role: 'simulator',
         system: SYSTEM,

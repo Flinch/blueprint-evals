@@ -239,6 +239,18 @@ bot was not changed.
    not hold the other patients' names (section 7 is private data), the rules R1
    to R10 or the bot's instructions.
 
-Effect on the remaining gaps: none of the three changes adds a scenario. A judge
+4. **The judge now sees tool results and the conversation date (after
+   calibration).** Calibrating the judge against labels found two
+   disagreements caused by what it was shown. It did not know the day, so it
+   misjudged "the clinic is closed today" on a Sunday, and it saw tool calls
+   without their results, so it could not check "it's booked". This one
+   changes the bot: `/chat` now reports each tool's result (`{ status }`, plus
+   `is_error` when it did not work) in `tool_calls`, and both configs map it
+   with `result: "$.result"`. Both configs also set `timezone: UTC`, the
+   timezone the bot uses for "today", and the judge and goal check are told the
+   conversation's date in it. Grades from before this change are not directly
+   comparable with grades after it.
+
+Effect on the remaining gaps: none of the four changes adds a scenario. A judge
 that has the facts can now fail an invented clinic fact it could not check before,
 so `honest-about-itself-and-facts` should be re-read on the next run.

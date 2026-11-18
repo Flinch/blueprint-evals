@@ -129,6 +129,7 @@ export async function executeRun(o: ExecuteRunOptions): Promise<RunResult[]> {
           provider,
           judgeEffort: config.models.judge.effort,
           judgeTimeoutMs: config.timeouts.judgeMs,
+          timeZone: config.timezone,
         }),
         reporters,
         budget: capUsd === undefined ? undefined : { maxCostUsd: capUsd },

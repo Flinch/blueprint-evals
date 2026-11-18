@@ -4,7 +4,12 @@
 // Contract (same shape as the stub agent)
 //   POST /chat   { message: string, conversation_id?: string }
 //        ->      { reply: string, conversation_id: string,
-//                  tool_calls: { name: string, args: object }[] }
+//                  tool_calls: { name: string, args: object,
+//                                result: { status: string, is_error?: true } }[] }
+//                Each result is what the tool returned to the model: its status,
+//                and is_error when the model was told the call did not work. A
+//                result holds only that status, never appointment details or
+//                anything from today's appointment list.
 //   GET  /appointments/:conversation_id   the appointment as the system holds it
 //   GET  /health
 //
@@ -61,9 +66,17 @@ export interface Appointment {
   reason?: string
 }
 
+/** What a tool returned to the model. */
+export interface ToolResult {
+  status: string
+  /** Present, and true, only when the model was told the call did not work. */
+  is_error?: true
+}
+
 export interface ToolCall {
   name: string
   args: Record<string, unknown>
+  result: ToolResult
 }
 
 // Strict schemas: the API guarantees tool input matches exactly.
@@ -307,10 +320,11 @@ export function createHealthBot(options: HealthBotOptions = {}) {
         for (const block of response.content) {
           if (block.type !== 'tool_use') continue
           const args = (block.input ?? {}) as Record<string, unknown>
-          toolCalls.push({ name: block.name, args })
           const toolSpan = turn.toolCall({ name: block.name, args })
           const { status, isError } = runTool(block.name, block.input, conv)
           toolSpan.end({ status, isError })
+          // Reported exactly as the model received it, so a grader can check a claim like "it's booked".
+          toolCalls.push({ name: block.name, args, result: { status, ...(isError ? { is_error: true as const } : {}) } })
           results.push({
             type: 'tool_result',
             tool_use_id: block.id,

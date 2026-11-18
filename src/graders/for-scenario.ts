@@ -12,6 +12,8 @@ export interface ScenarioGraderOptions {
   provider?: ModelProvider
   judgeEffort?: Effort
   judgeTimeoutMs?: number
+  /** IANA timezone for the conversation date shown to LLM graders. Default: the machine's. */
+  timeZone?: string
 }
 
 /**
@@ -43,11 +45,12 @@ export function gradersForScenario(scenario: Scenario, options: ScenarioGraderOp
         provider,
         effort: options.judgeEffort,
         timeoutMs: options.judgeTimeoutMs,
+        timeZone: options.timeZone,
       }),
     )
   }
   if (scenario.goal && provider) {
-    graders.push(createGoalCheck({ provider, effort: options.judgeEffort, timeoutMs: options.judgeTimeoutMs }))
+    graders.push(createGoalCheck({ provider, effort: options.judgeEffort, timeoutMs: options.judgeTimeoutMs, timeZone: options.timeZone }))
   }
   return graders
 }

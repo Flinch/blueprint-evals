@@ -3,7 +3,8 @@ import { ContaminationError, formatReport } from '../calibration/evaluate.js'
 import { loadLabels, resolveLabels, SplitViolationError } from '../calibration/labels.js'
 import { loadConfig, loadRubric } from '../core/load.js'
 import type { ModelProvider } from '../core/interfaces.js'
-import { executeCalibration, planCalibration } from '../engine/calibrate.js'
+import { executeCalibration, planCalibration, runStartLookup } from '../engine/calibrate.js'
+import { storePaths } from '../store/index.js'
 import { providerErrors } from '../engine/plan.js'
 import { formatUsd } from '../reporters/console.js'
 import {
@@ -107,7 +108,9 @@ export async function calibrateCommand(argv: string[], io: CliIo): Promise<numbe
 
   let report
   try {
-    report = await executeCalibration({ config, labels, rubric, provider, split, selection })
+    // A label made from a saved run is judged with that run's date, as the run was.
+    const conversationStartedAt = runStartLookup(storePaths(io.workdir ?? io.cwd).runs)
+    report = await executeCalibration({ config, labels, rubric, provider, split, selection, conversationStartedAt })
   } catch (e) {
     if (e instanceof ContaminationError || e instanceof SplitViolationError) {
       print(io.stderr, e.message)

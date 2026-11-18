@@ -1,12 +1,15 @@
 import { z } from 'zod'
 import type { Grader, GraderResult, ModelProvider } from '../core/interfaces.js'
 import type { Effort } from '../core/trace.js'
-import { INJECTION_NOTICE, renderTranscript } from './transcript.js'
+import { conversationDateLine, INJECTION_NOTICE, renderTranscript } from './transcript.js'
 
 // Did the agent reach the scenario's stated goal? Kept as a separate, much
 // smaller call than the rubric judge: goal achievement should stay gradable
 // for a scenario with no rubric, and re-grading it never means re-sending the
 // whole rubric. Skipped when the scenario has no goal.
+//
+// Like the rubric judge, it sees tool results and the date the conversation
+// took place: a goal such as "booked for next Tuesday" depends on both.
 
 const GoalSchema = z.object({ achieved: z.boolean(), critique: z.string() })
 
@@ -19,10 +22,12 @@ export interface GoalCheckOptions {
   provider: ModelProvider
   timeoutMs?: number
   effort?: Effort
+  /** IANA timezone for the conversation date line. Default: the machine's. */
+  timeZone?: string
 }
 
 export function createGoalCheck(options: GoalCheckOptions): Grader {
-  const { provider, timeoutMs = 60_000, effort = 'high' } = options
+  const { provider, timeoutMs = 60_000, effort = 'high', timeZone } = options
   const name = 'goal-check'
 
   return {
@@ -32,6 +37,8 @@ export function createGoalCheck(options: GoalCheckOptions): Grader {
     async grade(trace, scenario): Promise<GraderResult> {
       if (!scenario.goal) return { grader: name, status: 'skipped', reason: 'The scenario has no goal to check.' }
 
+      const dateLine = conversationDateLine(trace.startedAt, timeZone)
+      const date = dateLine ? `${dateLine}\n` : ''
       const fail = (reason: string, extra: Partial<GraderResult> = {}): GraderResult => ({ grader: name, status: 'error', reason, ...extra })
       let res
       try {
@@ -41,7 +48,7 @@ export function createGoalCheck(options: GoalCheckOptions): Grader {
           messages: [
             {
               role: 'user',
-              content: `Goal:\n${scenario.goal}\n\n<transcript>\n${renderTranscript(trace.turns)}\n</transcript>\n\nWas the goal achieved by the end of the conversation?`,
+              content: `Goal:\n${scenario.goal}\n\n${date}<transcript>\n${renderTranscript(trace.turns)}\n</transcript>\n\nWas the goal achieved by the end of the conversation?`,
             },
           ],
           schema: GoalSchema,

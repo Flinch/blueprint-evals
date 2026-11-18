@@ -44,7 +44,7 @@ type Block = Record<string, unknown>
 interface Reply {
   reply: string
   conversation_id: string
-  tool_calls: { name: string; args: Record<string, unknown> }[]
+  tool_calls: { name: string; args: Record<string, unknown>; result?: unknown }[]
   error?: string
 }
 
@@ -221,7 +221,7 @@ describe('what the bot reports to a tracer', () => {
     expect(toolEnd.info).toEqual({ status: 'rescheduled', isError: false })
 
     expect(turnEnd.info).toEqual({ status: 200, output: 'Checking.\n\nMoved to Friday at 14:00.', toolCallCount: 1 })
-    expect(body.tool_calls).toEqual([{ name: 'reschedule_appointment', args: { date: 'Friday', time: '14:00' } }])
+    expect(body.tool_calls).toEqual([{ name: 'reschedule_appointment', args: { date: 'Friday', time: '14:00' }, result: { status: 'rescheduled' } }])
   })
 
   it('tags the trace with the active defect', async () => {

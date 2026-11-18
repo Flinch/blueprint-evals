@@ -11,6 +11,11 @@
 # shortCircuit is off so the judge also runs after a code check fails. Every
 # failing run then shows the judge's critique, which is what the known-bad
 # builds are for.
+#
+# The bot works out "today" in UTC (prompt.ts), so the judge is told the
+# conversation date in UTC too. The two must match: a judge working in another
+# timezone would see a different day near midnight.
+timezone: UTC
 models:
   simulator: { provider: anthropic, model: claude-haiku-5-5, effort: low, fallbacks: false }
   judge:     { provider: anthropic, model: claude-sonnet-5-5, effort: high, fallbacks: true }
@@ -33,4 +38,5 @@ targets:
         path: "$.tool_calls[*]"
         name: "$.name"
         arguments: "$.args"
+        result: "$.result"
     toolCalls: reported

@@ -4,9 +4,9 @@ import { queryAll, queryOne } from '../core/jsonpath.js'
 import type { ToolCall, ToolCallSupport } from '../core/trace.js'
 
 // A generic adapter for any agent with an HTTP endpoint. The request body is
-// built from a template and the reply text, session id and tool calls are read
-// from the response using JSON paths, so a new agent needs configuration, not
-// code.
+// built from a template and the reply text, session id and tool calls (with
+// their results, when mapped) are read from the response using JSON paths, so a
+// new agent needs configuration, not code.
 
 export type HttpTargetConfig = Extract<TargetConfig, { kind: 'http' }>
 
@@ -66,7 +66,14 @@ function extractToolCalls(body: unknown, mapping: NonNullable<HttpTargetConfig['
     }
     const argsObject =
       parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {}
-    return { name, arguments: argsObject }
+    const call: ToolCall = { name, arguments: argsObject }
+    // The result is kept as the target returned it. Without a mapping, or when
+    // the call has nothing at the path, no result is recorded.
+    if (mapping.result !== undefined) {
+      const result = queryOne(element, mapping.result)
+      if (result !== undefined) call.result = result
+    }
+    return call
   })
 }
 

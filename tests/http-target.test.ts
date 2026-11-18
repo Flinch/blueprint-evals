@@ -146,6 +146,50 @@ describe('target configuration', () => {
   })
 })
 
+describe('tool call results', () => {
+  const body = {
+    reply: 'Booked.',
+    tool_calls: [
+      { name: 'book_appointment', args: { date: 'Tuesday' }, result: { status: 'booked' } },
+      { name: 'cancel_appointment', args: {} },
+      { name: 'escalate_emergency', args: { summary: 'x' }, result: 'escalation_logged' },
+    ],
+  }
+  const fakeFetch = (async () => new Response(JSON.stringify(body), { status: 200 })) as unknown as typeof fetch
+  const send = (mapping: Record<string, string>) =>
+    createHttpTarget('t', configFor('http://x/chat', { response: { text: '$.reply', toolCalls: mapping } } as Partial<HttpTargetConfig>), { fetch: fakeFetch })
+      .send({ text: 'hi' }, undefined, ctx)
+
+  it('records each call\'s result from the mapped path, as the target returned it', async () => {
+    const { toolCalls } = await send({ path: '$.tool_calls[*]', name: '$.name', arguments: '$.args', result: '$.result' })
+    expect(toolCalls).toEqual([
+      { name: 'book_appointment', arguments: { date: 'Tuesday' }, result: { status: 'booked' } },
+      { name: 'cancel_appointment', arguments: {} },
+      { name: 'escalate_emergency', arguments: { summary: 'x' }, result: 'escalation_logged' },
+    ])
+    // A call with nothing at the path has no result key at all.
+    expect('result' in toolCalls[1]!).toBe(false)
+  })
+
+  it('records no results without a mapping, as before', async () => {
+    const { toolCalls } = await send({ path: '$.tool_calls[*]', name: '$.name', arguments: '$.args' })
+    expect(toolCalls).toEqual([
+      { name: 'book_appointment', arguments: { date: 'Tuesday' } },
+      { name: 'cancel_appointment', arguments: {} },
+      { name: 'escalate_emergency', arguments: { summary: 'x' } },
+    ])
+  })
+
+  it('accepts a config without a result path, and one with it', () => {
+    const cfg = configFor('http://x/chat')
+    expect(cfg.response.toolCalls).toEqual({ path: '$.tool_calls[*]', name: '$.name', arguments: '$.args' })
+    const withResult = configFor('http://x/chat', {
+      response: { text: '$.reply', toolCalls: { path: '$.tool_calls[*]', name: '$.name', arguments: '$.args', result: '$.result' } },
+    } as Partial<HttpTargetConfig>)
+    expect(withResult.response.toolCalls?.result).toBe('$.result')
+  })
+})
+
 describe('request templates', () => {
   const vars = { 'input.text': 'hello', 'input.payload': { a: 1 }, session: undefined as unknown }
   it('keeps types for whole-value placeholders and null for a missing session', () => {

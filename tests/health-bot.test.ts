@@ -26,7 +26,7 @@ type Block = Record<string, unknown>
 interface Reply {
   reply: string
   conversation_id: string
-  tool_calls: { name: string; args: Record<string, unknown> }[]
+  tool_calls: { name: string; args: Record<string, unknown>; result: { status: string; is_error?: true } }[]
   error?: string
 }
 
@@ -101,9 +101,10 @@ describe('the tool loop', () => {
     const { status, body } = await t.chat('Move my appointment to Friday 2pm. Yes, go ahead.')
     expect(status).toBe(200)
     expect(body.reply).toBe('All done.')
+    // Each call carries what the tool returned to the model.
     expect(body.tool_calls).toEqual([
-      { name: 'reschedule_appointment', args: { date: 'Friday', time: '14:00' } },
-      { name: 'escalate_emergency', args: { summary: 'chest pain' } },
+      { name: 'reschedule_appointment', args: { date: 'Friday', time: '14:00' }, result: { status: 'rescheduled' } },
+      { name: 'escalate_emergency', args: { summary: 'chest pain' }, result: { status: 'escalation_logged' } },
     ])
     expect(t.requests).toHaveLength(2)
     // The second request carries both tool results in one user message, as plain statuses.
@@ -152,9 +153,25 @@ describe('the tool loop', () => {
       response([text('You have no active appointment.')]),
     ])
     const a = await t.chat('cancel, yes')
-    await t.chat('move it to Friday 10:00, yes', a.body.conversation_id)
+    const b = await t.chat('move it to Friday 10:00, yes', a.body.conversation_id)
     const result = (t.requests[3]!.messages.at(-1)!.content as unknown as Block[])[0]!
     expect(result).toEqual({ type: 'tool_result', tool_use_id: 'x2', content: 'no_active_appointment', is_error: true })
+    // The response reports the same result, error flag included, so a grader can see the move did not happen.
+    expect(a.body.tool_calls).toEqual([{ name: 'cancel_appointment', args: {}, result: { status: 'cancelled' } }])
+    expect(b.body.tool_calls).toEqual([
+      { name: 'reschedule_appointment', args: { date: 'Friday', time: '10:00' }, result: { status: 'no_active_appointment', is_error: true } },
+    ])
+  })
+
+  it('puts only the status in a tool result, never appointment details or the appointment list', async () => {
+    const t = await start([
+      response([toolUse('b1', 'book_appointment', { patient_first_name: 'Sam', date: 'Saturday', time: '09:30', reason: 'check-up' })], 'tool_use'),
+      response([text('Booked.')]),
+    ])
+    const { body } = await t.chat('Book Saturday 9:30 for Sam, yes')
+    expect(body.tool_calls[0]!.result).toEqual({ status: 'booked' })
+    const raw = JSON.stringify(body.tool_calls.map(c => c.result))
+    for (const name of ['Jorge Alvarez', 'Mia Brennan', 'Wei Chen', 'Okafor', 'Sam', 'Saturday']) expect(raw).not.toContain(name)
   })
 })
 
@@ -725,8 +742,10 @@ describe('the config files', () => {
       expect(target.response).toEqual({
         text: '$.reply',
         session: '$.conversation_id',
-        toolCalls: { path: '$.tool_calls[*]', name: '$.name', arguments: '$.args' },
+        toolCalls: { path: '$.tool_calls[*]', name: '$.name', arguments: '$.args', result: '$.result' },
       })
+      // The bot's "today" is UTC (prompt.ts), so the judge's conversation date must be UTC too.
+      expect(config.timezone).toBe('UTC')
     }
   })
 

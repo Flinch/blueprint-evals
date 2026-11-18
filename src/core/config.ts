@@ -60,6 +60,16 @@ function envRefPaths(value: unknown, path = ''): string[] {
   return []
 }
 
+/** Whether Intl knows this IANA timezone name. */
+export function isValidTimeZone(timeZone: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone })
+    return true
+  } catch {
+    return false
+  }
+}
+
 const ModelConfig = z.object({
   provider: z.string().default('anthropic'),
   model: z.string(),
@@ -88,7 +98,13 @@ export const TargetConfigSchema = z.discriminatedUnion('kind', [
       text: z.string(),
       session: z.string().optional(),
       toolCalls: z
-        .object({ path: z.string(), name: z.string(), arguments: z.string() })
+        .object({
+          path: z.string(),
+          name: z.string(),
+          arguments: z.string(),
+          /** Where a tool call's result is, relative to the call. Optional: without it no result is recorded. */
+          result: z.string().optional(),
+        })
         .optional(),
     }),
     ...TargetBase,
@@ -108,5 +124,15 @@ export const ConfigSchema = z.object({
     .object({ simulatorMs: z.number().int().positive().default(60_000), judgeMs: z.number().int().positive().default(180_000) })
     .default({ simulatorMs: 60_000, judgeMs: 180_000 }),
   shortCircuit: z.boolean().default(true),
+  /**
+   * IANA timezone name (for example America/Toronto) the conversations take
+   * place in. LLM graders are told the conversation's date in this timezone, so
+   * they can check claims about days and dates. Default: the machine's local
+   * timezone. Set it to the timezone the system under test uses for "today".
+   */
+  timezone: z
+    .string()
+    .refine(isValidTimeZone, { message: 'timezone must be an IANA timezone name, for example America/Toronto or UTC' })
+    .optional(),
 })
 export type Config = z.infer<typeof ConfigSchema>

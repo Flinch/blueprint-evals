@@ -204,6 +204,16 @@ export interface RubricLabelJudgeOptions {
   provider: ModelProvider
   effort?: Effort
   timeoutMs?: number
+  /** IANA timezone for the conversation date line. Default: the machine's. */
+  timeZone?: string
+  /**
+   * When the conversation a label came from started (ISO time), if known: for
+   * a label made from a run, that run's `startedAt`. The judge is then told the
+   * conversation date, as it is in a run. Without it, or when it returns
+   * undefined, the date line is left out: the judge is never shown a date that
+   * is not the conversation's.
+   */
+  conversationStartedAt?: (label: Label) => string | undefined
 }
 
 const STUB_SCENARIO = ScenarioSchema.parse({ id: 'calibration', version: 1, target: 'calibration', seed_message: 'calibration' })
@@ -216,7 +226,7 @@ const STUB_SCENARIO = ScenarioSchema.parse({ id: 'calibration', version: 1, targ
  * binary: the judge here is not offered `not_applicable`.
  */
 export function createRubricLabelJudge(options: RubricLabelJudgeOptions): LabelJudge {
-  const { rubric, provider, effort, timeoutMs } = options
+  const { rubric, provider, effort, timeoutMs, timeZone, conversationStartedAt } = options
   return {
     name: `rubric-judge(${rubric.id}@${rubric.version})`,
     anchors: rubric.anchors,
@@ -233,6 +243,7 @@ export function createRubricLabelJudge(options: RubricLabelJudgeOptions): LabelJ
       }
 
       const now = new Date().toISOString()
+      const startedAt = conversationStartedAt?.(label)
       const turns: Turn[] = []
       if (label.input !== undefined) turns.push({ index: turns.length, role: 'user', content: label.input, at: now })
       turns.push({ index: turns.length, role: 'assistant', content: label.output, at: now })
@@ -242,14 +253,22 @@ export function createRubricLabelJudge(options: RubricLabelJudgeOptions): LabelJ
         scenario: { id: 'calibration', version: '1' },
         target: { name: 'calibration', kind: 'label', toolCalls: 'none' },
         turns,
-        startedAt: now,
+        startedAt: startedAt ?? now,
         endedAt: now,
         usage: ZERO_USAGE,
         metadata: { frameworkVersion: FRAMEWORK_VERSION, models: {} },
       }
 
       // A labelled item is applicable by definition, so this judge cannot answer not_applicable.
-      const result = await createRubricJudge({ rubric: single, provider, effort, timeoutMs, allowNotApplicable: false }).grade(trace, STUB_SCENARIO, { runId: label.id })
+      const result = await createRubricJudge({
+        rubric: single,
+        provider,
+        effort,
+        timeoutMs,
+        allowNotApplicable: false,
+        timeZone,
+        showConversationDate: startedAt !== undefined,
+      }).grade(trace, STUB_SCENARIO, { runId: label.id })
       if (result.status === 'error' || !result.criteria?.[0]) throw new Error(result.reason)
       const { verdict, critique } = result.criteria[0]
       // Unreachable while the schema forbids it. Kept so a future change cannot slip an n/a into the metrics.

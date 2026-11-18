@@ -149,7 +149,7 @@ interface ToolCall {
   id?: string
   name: string
   arguments: Record<string, unknown>
-  result?: unknown
+  result?: unknown            // what the tool returned, when the target reports it
   error?: string
 }
 
@@ -253,8 +253,15 @@ targets:
         path: "$.tool_calls[*]"
         name: "$.name"
         arguments: "$.args"
+        result: "$.result"    # optional
     toolCalls: reported
 ```
+
+   `name`, `arguments` and the optional `result` are paths relative to each
+   element `path` matches. `result` is stored as `ToolCall.result`, as the
+   target returned it, and LLM graders see it in the transcript (see
+   [0002](0002-judge-methodology.md#tool-results-and-the-conversation-date)).
+   Without it, or when a call has nothing at that path, no result is recorded.
 
 3. `fake`: scripted replies for the framework's own tests.
 
@@ -671,6 +678,11 @@ Differences from the first draft of this section:
 - **Unimplemented targets.** `vapi-chat` and `fake` parse in the config but are
   not implemented targets yet, so a scenario that uses one is an error in both
   `validate` and `run`.
+
+The optional top-level `timezone` (an IANA name such as `America/Toronto`)
+sets the timezone in which LLM graders are told the conversation's date. It
+defaults to the machine's local timezone. Set it to the timezone the system
+under test uses for "today".
 
 Example config:
 
