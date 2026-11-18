@@ -2,9 +2,8 @@ import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { itemIdOfLabel, resolveLabels, type Label } from '../calibration/labels.js'
 import type { RunResult } from '../core/interfaces.js'
-import type { Usage } from '../core/trace.js'
+import { judgedResponse, type Usage } from '../core/trace.js'
 import { assertSafeId, isSafeId, newId, writeFileAtomic } from './fs.js'
-import { judgedResponse } from './labels.js'
 import type { SuiteRecord } from './suites.js'
 
 // The findings report: what a person failed, and why, as a document a developer

@@ -247,6 +247,8 @@ export interface RunsResponse {
 export interface RunResponse {
   suiteId: string
   result: RunResult
+  /** The day the conversation took place, worded as LLM graders are told it, in the config's timezone. Null when the start time is not a valid time. */
+  conversationDate: string | null
 }
 
 // --------------------------------------------------- scenarios and rubrics

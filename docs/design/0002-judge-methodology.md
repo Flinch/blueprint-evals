@@ -148,12 +148,10 @@ followed a `booked` status or an error.
   too, because a goal such as "booked for next Tuesday" depends on the date.
   The line sits outside the transcript because the framework, not the system
   under test, supplies it.
-- **Calibration.** A label holds only an input and an output, so the label
-  judge has no conversation start of its own. When a label was made from a
-  saved run (its `group` is the run id), `evals calibrate` looks the run up and
-  uses its `startedAt`. Otherwise the line is left out, so the judge is never
+- **Calibration.** See [The same evidence for everyone](#the-same-evidence-for-everyone)
+  below: a label made from a saved run is judged on that whole run, with its
+  date. A label with no run behind it gets no date line, so the judge is never
   shown the day of the calibration as if it were the day of the conversation.
-  The web UI's calibration does not look runs up yet.
 - **No date, no line.** When no date is known the line is omitted, and the
   prompt is byte-identical to the one before this change.
 
@@ -161,6 +159,53 @@ Both change what the judge sees. The judge's name, `rubric-judge(<id>@<version>)
 records only the rubric, and there is no separate prompt version, so nothing in
 a result marks the change: grades and calibration reports from before and after
 it are not directly comparable.
+
+### The same evidence for everyone
+
+Three readers decide whether a reply meets a criterion: the person labelling it
+in the review queue, the calibration judge measured against that label, and the
+production judge that grades every run. They all see the same evidence: the
+whole transcript, every tool call with its arguments and result (the judged
+reply's own calls included), and the date the conversation took place. A
+calibration judge that sees less than the production judge measures a different
+judge, and a person who sees less than the judge cannot tell whether the judge
+was right.
+
+- **The labeller.** A review queue item carries every turn with its tool calls
+  and results, the judged reply's own calls (`outputToolCalls`), any turns after
+  the reply, and `conversationDate`, worded as the judge's date line words it and
+  in the config's timezone. The page shows the date at the top of the item and
+  each tool call under its turn: name, arguments, the result's status as a badge
+  (an error status, or a call that errored, in the error style) and the full JSON
+  one click away. The judge's transcript cuts a long result at 500 characters;
+  the page shows it whole. See [0003](0003-ui-and-api.md#the-unit-of-labelling).
+- **The calibration judge.** A label made from a saved run is judged on that
+  whole run: the stored turns, rendered by the same `renderTranscript` with
+  results, and the same date line, judging only the label's criterion. A label
+  counts as made from a saved run when its item id is `<group>:<criterion>` (the
+  id the review queue gives), a run with the id `group` is saved in
+  `.evals/runs`, and that run's judged reply (its last assistant reply with text)
+  is the label's `output`. A revision is about the same item, so it is judged on
+  the same run. Both `evals calibrate` and the web UI look runs up this way.
+- **The fallback.** A hand-written label, or one whose run is not saved here, is
+  judged on its own `input` and `output` with no date, as before. The report's
+  `evidence` says how many items took each path (`fullRun`, `labelText`), the
+  preview says so before anything is spent, and both add a warning when any item
+  used the label text, because those items measure a judge that saw less than
+  the production one.
+- **Previews.** Which evidence each item gets is part of what a calibration
+  measures, so the web UI's preview token covers it (and the timezone). A run
+  that disappears or changes between the preview and the start moves its items
+  to another path, and start answers 412 until the person previews again. The
+  runs are read once per request, so the calibration measures exactly what the
+  token covered.
+
+Worked examples (anchors) are unchanged: they stay the input and output written
+in the rubric.
+
+Calibrations from before this change judged a label made from a run on the
+label's input and output, which leave out the judged reply's own tool calls, so
+they are not directly comparable with later ones.
 
 ### Length is a code check
 

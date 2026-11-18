@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Label } from '../../src/ui/api-types'
 import { baseRoutes, failure, installEventSource, installFetch, labelStatsFixture, renderApp } from './fake-api'
-import { JUDGE_CRITIQUE, queue, queueItem, reveal } from './fixtures'
+import { failingRun, JUDGE_CRITIQUE, queue, queueItem, reveal } from './fixtures'
 
 beforeEach(() => installEventSource())
 
@@ -368,7 +368,7 @@ describe('blind labelling: validation and controls', () => {
     renderApp('/classify')
     await screen.findByLabelText('Item to label')
     expect(screen.queryByText('EARLIER-AGENT-LINE')).toBeNull()
-    await user.click(screen.getByRole('button', { name: /Show the earlier conversation \(2 turns\)/ }))
+    await user.click(screen.getByRole('button', { name: /Show the earlier conversation \(2 turns, 1 tool call\)/ }))
     expect(screen.getByText('EARLIER-AGENT-LINE')).toBeInTheDocument()
   })
 
@@ -465,5 +465,94 @@ describe('labels list', () => {
     renderApp('/classify/labels')
     expect(await screen.findByRole('heading', { name: 'No labels yet' })).toBeInTheDocument()
     await waitFor(() => expect(screen.getByText('Labels')).toBeInTheDocument())
+  })
+})
+
+describe('the evidence the judge sees, shown to the person labelling', () => {
+  const item = queueItem({
+    context: [
+      { index: 0, role: 'user', content: 'Cancel Thursday please.' },
+      { index: 1, role: 'assistant', content: 'Let me look.', toolCalls: [{ name: 'find_appointment', arguments: { day: 'Thursday' }, result: { status: 'found', id: 'appt-7' } }] },
+      { index: 2, role: 'user', content: 'Yes, that one.' },
+    ],
+    outputTurn: 3,
+    outputToolCalls: [{ name: 'cancel_appointment', arguments: { id: 'appt-7' }, result: { status: 'no_active_appointment', is_error: true } }],
+    after: [{ index: 4, role: 'assistant', content: '', toolCalls: [{ name: 'log_event', arguments: {}, error: 'timeout' }] }],
+    conversationDate: 'Sunday, 15 November 2026 (America/Toronto)',
+  })
+
+  it('shows the date, the judged reply\'s own tool calls with their results, the earlier calls, and turns after the reply', async () => {
+    const user = userEvent.setup()
+    installFetch(routes({ 'GET /api/queue': { body: queue({ items: [item] }) } }))
+    renderApp('/classify')
+    const panel = await screen.findByLabelText('Item to label')
+    expect(within(panel).getByLabelText('Conversation date')).toHaveTextContent('The conversation took place on Sunday, 15 November 2026 (America/Toronto).')
+
+    // The judged reply's call: name, arguments and the result's status at a glance, in an error style.
+    const calls = within(panel).getByLabelText('Tool calls in the reply being judged')
+    const head = within(calls).getByRole('button', { name: /Tool call: cancel_appointment/ })
+    expect(head).toHaveTextContent('{"id":"appt-7"}')
+    const badge = within(head).getByText('no_active_appointment')
+    expect(badge).toHaveClass('badge-fail')
+    expect(head.closest('.toolcall')).toHaveClass('toolcall-failed')
+    // The full result is one click away.
+    expect(within(panel).queryByLabelText('Result of cancel_appointment')).toBeNull()
+    await user.click(head)
+    expect(within(panel).getByLabelText('Result of cancel_appointment').textContent).toContain('"is_error": true')
+
+    // A turn after the reply, with its error shown in the error style.
+    expect(within(panel).getByText('After the reply')).toBeInTheDocument()
+    expect(within(panel).getByText('timeout')).toHaveClass('toolcall-error')
+
+    // The earlier turns' calls and results.
+    await user.click(within(panel).getByRole('button', { name: /Show the earlier conversation \(3 turns, 1 tool call\)/ }))
+    const earlier = within(panel).getByRole('button', { name: /Tool call: find_appointment/ })
+    expect(within(earlier).getByText('found')).not.toHaveClass('badge-fail')
+    await user.click(earlier)
+    expect(within(panel).getByLabelText('Result of find_appointment').textContent).toContain('"id": "appt-7"')
+  })
+
+  it('shows no date line when the date is unknown', async () => {
+    installFetch(routes({ 'GET /api/queue': { body: queue({ items: [queueItem({ conversationDate: null })] }) } }))
+    renderApp('/classify')
+    const panel = await screen.findByLabelText('Item to label')
+    expect(within(panel).queryByLabelText('Conversation date')).toBeNull()
+    expect(within(panel).queryByLabelText('Tool calls in the reply being judged')).toBeNull()
+  })
+
+  it('in the labels list, loads the whole conversation of a label made from a run, with the date and tool results', async () => {
+    const user = userEvent.setup()
+    const labels: Label[] = [savedLabel(), savedLabel({ id: 'hand-1', group: undefined, criterion: 'no-medical-advice', at: '2026-11-11T11:00:00.000Z' })]
+    const fake = installFetch(routes({
+      'GET /api/labels': { body: { file: 'f', labels, stats: labelStatsFixture({ total: 2 }) } },
+      'GET /api/runs/run-fail-1': { body: { suiteId: 's3', result: failingRun(), conversationDate: 'Thursday, 12 November 2026 (UTC)' } },
+    }))
+    renderApp('/classify/labels')
+    await screen.findByText('hand-1')
+    // The hand-written label has no run to show.
+    await user.click(screen.getAllByRole('button', { name: 'Details' })[1]!)
+    expect(screen.queryByRole('button', { name: 'Show the whole conversation the judge sees' })).toBeNull()
+    await user.click(screen.getByRole('button', { name: 'Hide' }))
+
+    await user.click(screen.getAllByRole('button', { name: 'Details' })[0]!)
+    expect(fake.calls.some(c => c.path.startsWith('/api/runs/'))).toBe(false)
+    await user.click(screen.getByRole('button', { name: 'Show the whole conversation the judge sees' }))
+    const whole = await screen.findByLabelText('The whole conversation')
+    expect(within(whole).getByText('The conversation took place on Thursday, 12 November 2026 (UTC).')).toBeInTheDocument()
+    expect(within(whole).getByText('Sorry, it is already done.')).toBeInTheDocument()
+    const head = within(whole).getByRole('button', { name: /Tool call: cancel_appointment/ })
+    expect(within(head).getByText('Result')).toBeInTheDocument()
+  })
+
+  it('in the labels list, says so when the run is gone', async () => {
+    const user = userEvent.setup()
+    installFetch(routes({
+      'GET /api/labels': { body: { file: 'f', labels: [savedLabel()], stats: labelStatsFixture({ total: 1 }) } },
+      'GET /api/runs/run-fail-1': failure(404, 'not_found', 'No run "run-fail-1".'),
+    }))
+    renderApp('/classify/labels')
+    await user.click(await screen.findByRole('button', { name: 'Details' }))
+    await user.click(screen.getByRole('button', { name: 'Show the whole conversation the judge sees' }))
+    expect(await screen.findByText(/The run is not saved here any more/)).toBeInTheDocument()
   })
 })

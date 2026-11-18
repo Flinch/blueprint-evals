@@ -1,11 +1,12 @@
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { partition } from '../../src/index.js'
+import { createFakeProvider, partition } from '../../src/index.js'
 import type { CalibratePreviewResponse, CalibrationResponse, CalibrateStartResponse } from '../../src/ui/api-types.js'
-import { syntheticLabels } from '../label-helpers.js'
+import { idInSplit, label, syntheticLabels } from '../label-helpers.js'
 import { labelJudgeProvider, rubricYaml, toJsonl } from '../cli/harness.js'
 import { fixture, type Fixture } from './harness.js'
+import { saveSuite } from './records.js'
 
 const fixtures: Fixture[] = []
 afterEach(async () => {
@@ -171,5 +172,60 @@ describe('calibration through the API', () => {
     // A label file that does not parse.
     writeFileSync(join(f.workdir, '.evals', 'labels.jsonl'), 'nope\n')
     expect((await f.api.post('/api/calibrate/preview', req)).json().error.code).toBe('corrupt_record')
+  })
+})
+
+describe('what the dashboard calibration judge is shown', () => {
+  const runId = idInSplit('dev', 'run')
+  const STARTED = '2026-11-16T03:00:00.000Z'
+  const turns = [
+    { role: 'user' as const, content: 'Cancel my Thursday visit.' },
+    { role: 'assistant' as const, content: 'It is cancelled.', toolCalls: [{ name: 'cancel_appointment', arguments: { day: 'Thursday' }, result: { status: 'no_active_appointment', is_error: true } }] },
+  ]
+  const fromRun = label({ id: `${runId}:confirms`, group: runId, criterion: 'confirms', input: 'Cancel my Thursday visit.', output: 'It is cancelled.', verdict: 'fail' })
+  const handWritten = label({ id: idInSplit('dev', 'hand'), criterion: 'confirms', input: 'Move it', output: 'Done.', verdict: 'pass' })
+
+  async function evidenceFixture() {
+    const provider = createFakeProvider({ json: { verdicts: [{ criterion_id: 'confirms', critique: 'ok', verdict: 'fail' }] } })
+    const f = await fixture({ provider, ownScenarios: true, files: { 's.yaml': SCENARIO, 'rubrics/calib.yaml': rubricYaml() }, configEdit: t => `${t}\ntimezone: America/Toronto\n` })
+    fixtures.push(f)
+    mkdirSync(join(f.workdir, '.evals'), { recursive: true })
+    writeFileSync(join(f.workdir, '.evals', 'labels.jsonl'), toJsonl([fromRun, handWritten]))
+    saveSuite(f.workdir, [{ runId, turns, startedAt: STARTED, criteria: { confirms: 'fail' } }], { suiteId: 'suite-1' })
+    return { f, provider }
+  }
+
+  it('judges a label made from a saved run on the whole run with its date, as the command line does, and counts each path', async () => {
+    const { f, provider } = await evidenceFixture()
+    const preview = (await f.api.post('/api/calibrate/preview', req)).json<CalibratePreviewResponse>()
+    expect(preview.lines.join('\n')).toContain("Evidence: 1 judged on the whole saved run, 1 on the label's text alone.")
+    expect(preview.warnings.some(w => w.startsWith("1 of 2 items were judged on the label's text alone"))).toBe(true)
+    const r = await f.api.post('/api/calibrate/start', { ...req, previewToken: preview.previewToken, confirm: true })
+    expect(r.status).toBe(200)
+    const prompts = provider.calls.map(c => c.messages[0]!.content)
+    expect(prompts).toHaveLength(2)
+    const full = prompts.find(p => p.includes('cancel_appointment'))!
+    expect(full).toContain('The conversation took place on Sunday, 15 November 2026 (America/Toronto).')
+    expect(full).toContain('tool call: cancel_appointment({"day":"Thursday"})\n    tool result: {"status":"no_active_appointment","is_error":true}')
+    expect(prompts.find(p => p.includes('[1] assistant: Done.'))).not.toContain('The conversation took place')
+    const { report } = r.json<CalibrateStartResponse>().record
+    expect(report.evidence).toEqual({ fullRun: 1, labelText: 1 })
+    expect(report.warnings.some(w => w.startsWith("1 of 2 items were judged on the label's text alone"))).toBe(true)
+  })
+
+  it('needs a new preview when a run disappears after the preview, so the evidence never changes unseen', async () => {
+    const { f, provider } = await evidenceFixture()
+    const { previewToken } = (await f.api.post('/api/calibrate/preview', req)).json<CalibratePreviewResponse>()
+    rmSync(join(f.workdir, '.evals', 'runs'), { recursive: true, force: true })
+    const r = await f.api.post('/api/calibrate/start', { ...req, previewToken, confirm: true })
+    expect(r.status).toBe(412)
+    expect(provider.calls).toHaveLength(0)
+    // A fresh preview shows the change, and then measures what it showed.
+    const again = (await f.api.post('/api/calibrate/preview', req)).json<CalibratePreviewResponse>()
+    expect(again.lines.join('\n')).toContain("Evidence: 0 judged on the whole saved run, 2 on the label's text alone.")
+    const ok = await f.api.post('/api/calibrate/start', { ...req, previewToken: again.previewToken, confirm: true })
+    expect(ok.status).toBe(200)
+    expect(ok.json<CalibrateStartResponse>().record.report.evidence).toEqual({ fullRun: 0, labelText: 2 })
+    expect(provider.calls.every(c => !c.messages[0]!.content.includes('The conversation took place'))).toBe(true)
   })
 })

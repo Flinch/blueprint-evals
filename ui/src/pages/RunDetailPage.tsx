@@ -46,16 +46,47 @@ function modelText(m: ModelRef | undefined): string {
 
 // --------------------------------------------------------------- transcript
 
-function ToolCallView({ call, index }: { call: ToolCall; index: number }) {
+/** Arguments as one line of JSON, cut for the collapsed view. The full JSON is in the expanded view. */
+export function compactArgs(args: Record<string, unknown>, max = 80): string {
+  let json: string
+  try {
+    json = JSON.stringify(args) ?? ''
+  } catch {
+    json = String(args)
+  }
+  return json.length <= max ? json : `${json.slice(0, max - 3)}...`
+}
+
+/**
+ * The short status of a tool result, for a badge: its `status` field when it
+ * has one, else whether it says it failed. `error` is true when the result
+ * says the call did not work (`is_error: true`, `ok: false`, `success: false`
+ * or an `error` field). Null when there is no result.
+ */
+export function toolResultStatus(result: unknown): { text: string; error: boolean } | null {
+  if (result === undefined) return null
+  if (typeof result !== 'object' || result === null || Array.isArray(result)) return { text: 'Result', error: false }
+  const r = result as Record<string, unknown>
+  const error = r.is_error === true || r.ok === false || r.success === false || (r.error !== undefined && r.error !== null && r.error !== false && r.error !== '')
+  const status = r.status
+  if (typeof status === 'string' || typeof status === 'number' || typeof status === 'boolean') return { text: String(status), error }
+  return { text: error ? 'Failed' : 'Result', error }
+}
+
+export function ToolCallView({ call, index }: { call: ToolCall; index: number }) {
   const [open, setOpen] = useState(false)
   const id = `tc-${index}-${call.name}`
+  const status = toolResultStatus(call.result)
   return (
-    <div className="toolcall">
+    <div className={`toolcall${call.error || status?.error ? ' toolcall-failed' : ''}`}>
       <button type="button" className="toolcall-head" aria-expanded={open} aria-controls={id} onClick={() => setOpen(o => !o)}>
-        <span className="chev" aria-hidden="true">{'▸'}</span>
+        <span className="chev" aria-hidden="true">{'\u25B8'}</span>
         <span>Tool call: {call.name}</span>
+        <span className="toolcall-args muted">{compactArgs(call.arguments)}</span>
+        {status ? <span className={`badge badge-tag${status.error ? ' badge-fail' : ''}`} title="What the tool returned">{status.text}</span> : null}
         {call.error ? <span className="badge badge-error">Error</span> : null}
       </button>
+      {call.error ? <div className="toolcall-error small break">{call.error}</div> : null}
       {open ? (
         <div className="toolcall-body" id={id}>
           <div className="review-label">Arguments</div>
@@ -65,13 +96,9 @@ function ToolCallView({ call, index }: { call: ToolCall; index: number }) {
               <div className="review-label" style={{ marginTop: '0.5rem' }}>Result</div>
               <JsonBlock value={call.result} label={`Result of ${call.name}`} />
             </>
-          ) : null}
-          {call.error ? (
-            <>
-              <div className="review-label" style={{ marginTop: '0.5rem' }}>Error</div>
-              <div className="small break" style={{ color: 'var(--danger-text)' }}>{call.error}</div>
-            </>
-          ) : null}
+          ) : (
+            <div className="small muted" style={{ marginTop: '0.5rem' }}>The target did not report a result for this call.</div>
+          )}
         </div>
       ) : null}
     </div>
@@ -207,7 +234,7 @@ function countBy(graders: GraderResult[]) {
 
 // -------------------------------------------------------------------- page
 
-export function RunDetail({ result, suiteId }: { result: RunResult; suiteId?: string }) {
+export function RunDetail({ result, suiteId, conversationDate }: { result: RunResult; suiteId?: string; conversationDate?: string | null }) {
   const [flash, setFlash] = useState<number | null>(null)
   const jump = useCallback((index: number) => {
     const el = document.getElementById(`turn-${index}`)
@@ -273,6 +300,7 @@ export function RunDetail({ result, suiteId }: { result: RunResult; suiteId?: st
         <span className="section-note">Turn numbers match the [n] citations in the critiques below.</span>
       </div>
       <div className="card">
+        {conversationDate ? <p className="date-line" style={{ marginBottom: '0.8rem' }}>The conversation took place on {conversationDate}.</p> : null}
         {trace.turns.length === 0 ? (
           <p className="muted">This run recorded no turns.</p>
         ) : (
@@ -384,5 +412,5 @@ export function RunDetailPage({ runId }: { runId: string }) {
   if (run.loading && !run.data) return <Loading label="Loading the run" />
   if (run.error && !run.data) return <ErrorState error={run.error} onRetry={run.reload} title="Could not load this run" />
   if (!run.data) return null
-  return <RunDetail result={run.data.result} suiteId={run.data.suiteId} />
+  return <RunDetail result={run.data.result} suiteId={run.data.suiteId} conversationDate={run.data.conversationDate} />
 }

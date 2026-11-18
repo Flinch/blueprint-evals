@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { loadLabels } from '../../src/index.js'
-import type { LabelSuggestionsResponse, LabelsResponse, QueueResponse, RevealResponse } from '../../src/ui/api-types.js'
+import type { LabelSuggestionsResponse, LabelsResponse, QueueResponse, RevealResponse, RunResponse } from '../../src/ui/api-types.js'
 import { fixture, type Fixture } from './harness.js'
 import { critiqueOf, saveSuite, type RunSpec } from './records.js'
 
@@ -59,6 +59,29 @@ describe('GET /api/queue', () => {
       criterion: { id: 'confirms-before-acting', critical: false, text: expect.stringContaining('confirm') },
     })
     expect(body.items.find(i => i.criterion.id === 'no-medical-advice')!.criterion.critical).toBe(true)
+  })
+
+  it('carries what the judge is shown: tool calls with results, the judged reply\'s own calls, and the date in the config\'s timezone', async () => {
+    const f = await fixture({ configEdit: t => `${t}\ntimezone: America/Toronto\n` })
+    fixtures.push(f)
+    saveSuite(f.workdir, [{
+      runId: 'run-tools',
+      scenario: SCENARIO,
+      startedAt: '2026-11-16T03:00:00.000Z',
+      criteria: { [CRITERIA[0]!]: 'fail' },
+      turns: [
+        { role: 'user', content: 'Cancel Thursday.' },
+        { role: 'assistant', content: 'Cancelled.', toolCalls: [{ name: 'cancel_appointment', arguments: { day: 'Thursday' }, result: { status: 'no_active_appointment', is_error: true } }] },
+      ],
+    }], { suiteId: 'suite-t' })
+    const res = await f.api.get('/api/queue?limit=200')
+    expect(res.text).not.toContain('JUDGE-CRITIQUE')
+    const item = res.json<QueueResponse>().items.find(i => i.runId === 'run-tools')!
+    expect(item.conversationDate).toBe('Sunday, 15 November 2026 (America/Toronto)')
+    expect(item.outputToolCalls).toEqual([{ name: 'cancel_appointment', arguments: { day: 'Thursday' }, result: { status: 'no_active_appointment', is_error: true } }])
+    // The run page carries the same date.
+    const run = (await f.api.get('/api/runs/run-tools')).json<RunResponse>()
+    expect(run.conversationDate).toBe('Sunday, 15 November 2026 (America/Toronto)')
   })
 
   it('carries when the run started, so several runs of one scenario can be told apart', async () => {

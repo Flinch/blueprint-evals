@@ -1,8 +1,8 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { Label, LabelMeta, LabelStats, LabelSuggestionsResponse, QueueItem, QueueStats, RevealResponse } from '../../../src/ui/api-types'
+import type { Label, LabelMeta, LabelStats, LabelSuggestionsResponse, QueueItem, QueueStats, RevealResponse, RunResponse } from '../../../src/ui/api-types'
 import { api, describeError, isApiFailure } from '../api/client'
 import { useAsync } from '../api/useAsync'
-import { TurnView } from './RunDetailPage'
+import { ToolCallView, TurnView } from './RunDetailPage'
 import { Banner, CriticalMarker, EmptyState, ErrorState, Loading, PageHead, Tabs, VerdictBadge, Warnings } from '../components/ui'
 import { SplitBadge, WorkedExampleAction } from '../components/WorkedExample'
 import { percent, plural, shortDate } from '../lib/format'
@@ -10,7 +10,9 @@ import { criterionHref, runHref } from '../lib/router'
 import { readStored, writeStored } from '../lib/storage'
 
 // Blind labelling. The queue item has the input, the output being judged and the
-// criterion. It does not show the judge's verdict or critique, and it does not
+// criterion, and the same evidence the judge is shown: every turn's tool calls
+// with their arguments and results (the judged reply's own included) and the
+// date the conversation took place. It does not show the judge's verdict or critique, and it does not
 // show the item's `reason` (a targeted reason hints that the judge failed the
 // run). The judge's answer comes from the reveal endpoint, which this page only
 // calls after the label is saved. See docs/design/0003-ui-and-api.md.
@@ -116,6 +118,12 @@ export interface PickerGroup {
 }
 
 /** A UUID run id is too long to read, and its first eight characters tell runs apart. */
+/** "3 turns, 2 tool calls": what "Show the earlier conversation" will show. */
+export function earlierSummary(turns: QueueItem['context']): string {
+  const calls = turns.reduce((n, t) => n + (t.toolCalls?.length ?? 0), 0)
+  return calls > 0 ? `${plural(turns.length, 'turn')}, ${plural(calls, 'tool call')}` : plural(turns.length, 'turn')
+}
+
 export function shortRunId(runId: string): string {
   return runId.slice(0, 8)
 }
@@ -973,6 +981,9 @@ export function QueueView({
           <ItemPicker items={items} currentId={current.itemId} disabled={phase === 'saving'} capped={capped} onPick={jumpTo} />
 
           <article className="review-panel" aria-label="Item to label">
+            {current.conversationDate ? (
+              <div className="review-section date-line" aria-label="Conversation date">The conversation took place on {current.conversationDate}.</div>
+            ) : null}
             {oneCriterion ? (
               <div className="review-section row small muted">
                 <span>scenario {current.scenarioId}</span>
@@ -995,7 +1006,7 @@ export function QueueView({
               {current.context.length > 0 ? (
                 <div style={{ marginTop: '0.6rem' }}>
                   <button type="button" className="btn btn-ghost btn-sm" aria-expanded={showContext} onClick={() => setShowContext(s => !s)}>
-                    {showContext ? 'Hide the earlier conversation' : `Show the earlier conversation (${plural(current.context.length, 'turn')})`}
+                    {showContext ? 'Hide the earlier conversation' : `Show the earlier conversation (${earlierSummary(current.context)})`}
                   </button>
                   {showContext ? (
                     <div className="transcript" style={{ marginTop: '0.8rem' }}>
@@ -1008,7 +1019,20 @@ export function QueueView({
             <div className="review-section">
               <div className="review-label">The reply being judged (turn [{current.outputTurn}])</div>
               <div className="review-text">{current.output}</div>
+              {current.outputToolCalls?.length ? (
+                <div aria-label="Tool calls in the reply being judged" style={{ marginTop: '0.5rem' }}>
+                  {current.outputToolCalls.map((c, i) => <ToolCallView key={i} call={c} index={current.outputTurn * 100 + i} />)}
+                </div>
+              ) : null}
             </div>
+            {current.after?.length ? (
+              <div className="review-section">
+                <div className="review-label">After the reply</div>
+                <div className="transcript">
+                  {current.after.map(t => <TurnView key={t.index} turn={{ ...t, at: '' }} />)}
+                </div>
+              </div>
+            ) : null}
 
             {phase === 'edit' || phase === 'saving' ? (
               <form
@@ -1139,6 +1163,44 @@ export function QueueView({
 /** The item a label is about: a changed label's id ends in `~r<n>`. */
 export function itemIdOf(label: Pick<Label, 'id' | 'replaces'>): string {
   return label.replaces === undefined ? label.id : label.id.replace(/~r\d+$/, '')
+}
+
+/**
+ * The saved run a label was made from, as the judge is shown it: the date and
+ * every turn, with tool calls, their arguments and results. Fetched only when
+ * asked, since a label list can be long.
+ */
+export function LabelConversation({ runId }: { runId: string }) {
+  const [state, setState] = useState<{ status: 'idle' } | { status: 'loading' } | { status: 'ok'; run: RunResponse } | { status: 'error'; message: string }>({ status: 'idle' })
+  const load = async () => {
+    setState({ status: 'loading' })
+    try {
+      setState({ status: 'ok', run: await api.run(runId) })
+    } catch (e) {
+      setState({ status: 'error', message: isApiFailure(e) && e.status === 404 ? 'The run is not saved here any more, so only the label text above is available.' : describeError(e) })
+    }
+  }
+  if (state.status === 'idle' || state.status === 'loading') {
+    return (
+      <div>
+        <button type="button" className="btn btn-ghost btn-sm" disabled={state.status === 'loading'} onClick={() => void load()}>
+          {state.status === 'loading' ? <span className="spinner" aria-hidden="true" /> : null}
+          Show the whole conversation the judge sees
+        </button>
+      </div>
+    )
+  }
+  if (state.status === 'error') return <p className="small muted" role="status">{state.message}</p>
+  const { run } = state
+  return (
+    <div className="crit-box" aria-label="The whole conversation">
+      <h4>The whole conversation</h4>
+      {run.conversationDate ? <p className="date-line" style={{ marginBottom: '0.6rem' }}>The conversation took place on {run.conversationDate}.</p> : null}
+      <div className="transcript">
+        {run.result.trace.turns.map(t => <TurnView key={t.index} turn={{ index: t.index, role: t.role, content: t.content, toolCalls: t.toolCalls, at: t.at }} />)}
+      </div>
+    </div>
+  )
 }
 
 export function LabelsView() {
@@ -1283,6 +1345,7 @@ export function LabelsView() {
                               <div className="stack">
                                 {l.input ? <div className="crit-box"><h4>Input</h4>{l.input}</div> : null}
                                 <div className="crit-box"><h4>Output</h4>{l.output}</div>
+                                {l.group && itemId === `${l.group}:${l.criterion}` ? <LabelConversation key={l.group} runId={l.group} /> : null}
                                 <div className="crit-box"><h4>Critique by {l.labeler}</h4>{l.critique}</div>
                                 {first ? (
                                   <div className="crit-box">

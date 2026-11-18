@@ -219,9 +219,44 @@ describe('review queue', () => {
     expect(text).not.toMatch(/"verdict"/)
     expect(text).not.toMatch(/"judge/i)
     for (const item of queue.items) {
-      expect(Object.keys(item).sort()).toEqual(['context', 'criterion', 'group', 'input', 'itemId', 'output', 'outputTurn', 'reason', 'runId', 'scenarioId', 'startedAt', 'suiteId'])
+      expect(Object.keys(item).sort()).toEqual(['context', 'conversationDate', 'criterion', 'group', 'input', 'itemId', 'output', 'outputTurn', 'reason', 'runId', 'scenarioId', 'startedAt', 'suiteId'])
       expect(Object.keys(item.criterion).sort()).toEqual(['critical', 'id', 'text'])
     }
+  })
+
+  it('carries every tool call with its result, the judged reply\'s own calls and the date, and still nothing from the judge', () => {
+    const turns = [
+      { role: 'user' as const, content: 'Book me in for Tuesday.' },
+      { role: 'assistant' as const, content: 'Checking.', toolCalls: [{ id: 'tc-1', name: 'find_slots', arguments: { day: 'Tuesday' }, result: { status: 'ok', slots: ['10:00'] } }] },
+      { role: 'user' as const, content: 'Ten is fine.' },
+      { role: 'assistant' as const, content: 'You are booked for 10:00.', toolCalls: [{ id: 'tc-2', name: 'book_appointment', arguments: { time: '10:00' }, result: { status: 'invalid_arguments', is_error: true }, error: 'rejected' }] },
+      { role: 'assistant' as const, content: '', toolCalls: [{ name: 'log_event', arguments: {}, result: 'logged' }] },
+    ]
+    const workdir = tempDir('evals-queue-tools-')
+    const suite = saveSuite(workdir, [{ runId: 'run-t', criteria: { 'c-fail': 'fail' }, turns, startedAt: '2026-11-16T03:00:00.000Z' }], { suiteId: 'suite-t' })
+    const [item] = buildQueue({ suites: [suite], labels: [], rubricFor, limit: 100, timeZone: 'America/Toronto' }).items
+    expect(item).toBeDefined()
+    const text = JSON.stringify(item)
+    expect(text).not.toContain('JUDGE-CRITIQUE')
+    expect(text).not.toMatch(/critique|"verdict"|"judge/i)
+    expect(Object.keys(item!).sort()).toEqual(
+      ['after', 'context', 'conversationDate', 'criterion', 'group', 'input', 'itemId', 'output', 'outputToolCalls', 'outputTurn', 'reason', 'runId', 'scenarioId', 'startedAt', 'suiteId'],
+    )
+    expect(item!.conversationDate).toBe('Sunday, 15 November 2026 (America/Toronto)')
+    expect(item!.outputTurn).toBe(3)
+    // Built field by field: the call's id stays out, and so would any field added to ToolCall later.
+    expect(item!.outputToolCalls).toEqual([{ name: 'book_appointment', arguments: { time: '10:00' }, result: { status: 'invalid_arguments', is_error: true }, error: 'rejected' }])
+    expect(item!.context[1]!.toolCalls).toEqual([{ name: 'find_slots', arguments: { day: 'Tuesday' }, result: { status: 'ok', slots: ['10:00'] } }])
+    expect(item!.after).toEqual([{ index: 4, role: 'assistant', content: '', toolCalls: [{ name: 'log_event', arguments: {}, result: 'logged' }] }])
+    for (const t of [...item!.context, ...item!.after!]) expect(Object.keys(t).every(k => ['index', 'role', 'content', 'toolCalls'].includes(k))).toBe(true)
+    // The input transcript is the judge's rendering, results included.
+    expect(item!.input).toContain('tool result: {"status":"ok","slots":["10:00"]}')
+  })
+
+  it('has no date for a run whose start time is not a valid time', () => {
+    const workdir = tempDir('evals-queue-nodate-')
+    const suite = saveSuite(workdir, [{ runId: 'run-x', criteria: { 'c-fail': 'fail' }, startedAt: 'not a time' }], { suiteId: 'suite-x' })
+    expect(buildQueue({ suites: [suite], labels: [], rubricFor, limit: 100 }).items[0]!.conversationDate).toBeNull()
   })
 
   it('builds one item per run and criterion, with the input, output, group and rubric text', () => {

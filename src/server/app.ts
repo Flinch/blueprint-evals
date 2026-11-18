@@ -10,11 +10,12 @@ import {
 } from '../calibration/labels.js'
 import type { Anchor, Rubric } from '../core/scenario.js'
 import { FRAMEWORK_VERSION } from '../core/version.js'
+import { conversationDate } from '../graders/transcript.js'
 import type { Config } from '../core/config.js'
 import type { ModelProvider, Reporter } from '../core/interfaces.js'
 import { loadConfig, loadScenarios } from '../core/load.js'
 import { loadLabels } from '../calibration/labels.js'
-import { executeCalibration, planCalibration } from '../engine/calibrate.js'
+import { executeCalibration, planCalibration, savedRunLookup } from '../engine/calibrate.js'
 import { buildSummaryPrompt, estimateSummary, summariseFindings, SummaryFailedError } from '../engine/findings-summary.js'
 import { loadCatalog, type Catalog, type LoadedRubric } from '../engine/catalog.js'
 import { UsageError } from '../engine/errors.js'
@@ -564,7 +565,16 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServer>
     const rubrics = new Map<string, { criteria: { id: string; text: string; critical: boolean }[] }>()
     for (const l of cat?.scenarios ?? []) if (l.rubric) rubrics.set(l.scenario.id, { criteria: l.rubric.criteria.map(c => ({ id: c.id, text: c.text, critical: c.critical })) })
     const rubricFor: RubricLookup = id => rubrics.get(id)
-    return { suites, labels: readLabels(), rubricFor, limit, seed: options.queueSeed, ...(criterion !== undefined ? { criterion } : {}) }
+    return { suites, labels: readLabels(), rubricFor, timeZone: graderTimeZone(), limit, seed: options.queueSeed, ...(criterion !== undefined ? { criterion } : {}) }
+  }
+
+  /** The timezone LLM graders are told the conversation date in: the config's `timezone`, else (also without a usable config) the machine's. */
+  function graderTimeZone(): string | undefined {
+    try {
+      return loadCfg().timezone
+    } catch {
+      return undefined
+    }
   }
 
   /** Every line of the label file, revisions included. */
@@ -654,7 +664,7 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServer>
     'GET /api/runs/:runId': ({ params }) => {
       const found = findRun(paths.runs, params.runId!)
       if (!found) throw new ApiError(404, 'not_found', `No run "${params.runId}".`)
-      const body: RunResponse = found
+      const body: RunResponse = { ...found, conversationDate: conversationDate(found.result.trace.startedAt, graderTimeZone()) ?? null }
       return { body }
     },
 
@@ -987,7 +997,8 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServer>
       active = { kind: 'calibrate', startedAt: new Date().toISOString() }
       const work = (async () => {
         try {
-          const report = await executeCalibration({ config: c.config, labels: c.labels, rubric: c.rubric, provider, split: request.split, selection: c.selection })
+          // The plan's own run lookup: it has already read every run the fingerprint covers, so what was confirmed is what is measured.
+          const report = await executeCalibration({ config: c.config, labels: c.labels, rubric: c.rubric, provider, split: request.split, selection: c.selection, runLookup: c.runLookup })
           try {
             return saveCalibration(paths.calibration, {
               rubricId: c.rubric.id,
@@ -1134,7 +1145,17 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServer>
         throw new ApiError(422, 'corrupt_record', message(e))
       }
     })()
-    const plan = planCalibration({ config, labels, rubric: found.rubric, split: request.split, selection })
+    // Read once per request and kept: the fingerprint and the calibration see the same runs.
+    const runLookup = savedRunLookup(paths.runs)
+    const plan = planCalibration({ config, labels, rubric: found.rubric, split: request.split, selection, runLookup })
+    // What each item is judged on is part of what is measured. A run that disappears (or changes) after the preview
+    // moves its items to the label text, so the token no longer matches and start answers 412.
+    const runDigests = new Map<string, string>()
+    const evidence = plan.evidenceByItem.map(({ itemId, evidence: e }) => {
+      if (e.kind === 'labelText') return [itemId, 'labelText']
+      if (!runDigests.has(e.runId)) runDigests.set(e.runId, digest(e.run))
+      return [itemId, runDigests.get(e.runId)!]
+    })
     // The current labels decide what is measured. A revision changes them, so it needs a new preview.
     const fingerprint = {
       kind: 'calibrate',
@@ -1142,11 +1163,13 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServer>
       split: request.split,
       selection,
       labels: digest(current),
+      evidence,
+      timeZone: config.timezone ?? null,
       judge: config.models.judge,
       pricing: config.pricing[config.models.judge.model] ?? null,
       timeoutMs: config.timeouts.judgeMs,
     }
-    return { config, rubric: found.rubric, labels, plan, selection, fingerprint }
+    return { config, rubric: found.rubric, labels, plan, selection, fingerprint, runLookup }
   }
 
   function loadLabelsIfPresent() {

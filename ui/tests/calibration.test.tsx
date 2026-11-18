@@ -37,6 +37,18 @@ describe('calibration report', () => {
     expect(screen.getByLabelText('Labels changed after seeing the judge')).toHaveTextContent(/true negative rate is 60%/)
   })
 
+  it('says how many items the judge saw the whole saved run for, and shows nothing for a report saved before that existed', async () => {
+    installFetch(baseRoutes({ 'GET /api/calibration': { body: { latest: calibrationRecord({ report: report({ evidence: { fullRun: 7, labelText: 2 } }) }) } } }))
+    const first = renderApp('/calibration')
+    expect(await screen.findByTestId('evidence')).toHaveTextContent("7 judged on the whole saved run, 2 on the label's text alone")
+    first.unmount()
+    installEventSource()
+    installFetch(baseRoutes())
+    renderApp('/calibration')
+    await screen.findByLabelText('True negative rate')
+    expect(screen.queryByTestId('evidence')).toBeNull()
+  })
+
   it('shows no revision note when no label was changed, or for a report saved before revisions existed', async () => {
     installFetch(baseRoutes({ 'GET /api/calibration': { body: { latest: calibrationRecord({ report: report({ revisions: { revised: 0, verdictChanged: 0, blindMetrics: null } }) }) } } }))
     const first = renderApp('/calibration')

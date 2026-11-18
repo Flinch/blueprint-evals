@@ -3,7 +3,7 @@ import { ContaminationError, formatReport } from '../calibration/evaluate.js'
 import { loadLabels, resolveLabels, SplitViolationError } from '../calibration/labels.js'
 import { loadConfig, loadRubric } from '../core/load.js'
 import type { ModelProvider } from '../core/interfaces.js'
-import { executeCalibration, planCalibration, runStartLookup } from '../engine/calibrate.js'
+import { executeCalibration, planCalibration, savedRunLookup } from '../engine/calibrate.js'
 import { storePaths } from '../store/index.js'
 import { providerErrors } from '../engine/plan.js'
 import { formatUsd } from '../reporters/console.js'
@@ -28,6 +28,10 @@ Options:
                        Default: ${DEFAULT_CONFIG} in the current directory.
   --yes                Skip the confirmation. Required when there is no terminal (CI).
   -h, --help           Show this help.
+
+A label made from a saved run (in .evals/runs) is judged on that whole run, with
+tool results and the conversation date, as production grading saw it. Any other
+label is judged on its own input and output, and the report says how many were.
 
 The command prints how many judge calls it will make before it makes any, and
 asks you to confirm.
@@ -80,8 +84,12 @@ export async function calibrateCommand(argv: string[], io: CliIo): Promise<numbe
   const problems = providerErrors(config, false, true)
   if (problems.length > 0) throw new UsageError(problems.join('\n'))
 
+  // A label made from a saved run is judged on that whole run, with its date, as production grading saw it. One
+  // lookup for the preview and the calibration, so what is previewed is what is measured.
+  const runLookup = savedRunLookup(storePaths(io.workdir ?? io.cwd).runs)
+
   // Refuse a contaminated judge before anyone is asked to approve a spend.
-  const plan = planCalibration({ config, labels, rubric, split, selection })
+  const plan = planCalibration({ config, labels, rubric, split, selection, runLookup })
   if (plan.contamination) {
     print(io.stderr, `${plan.contamination}\nNothing was run and nothing was spent.`)
     return 2
@@ -108,9 +116,7 @@ export async function calibrateCommand(argv: string[], io: CliIo): Promise<numbe
 
   let report
   try {
-    // A label made from a saved run is judged with that run's date, as the run was.
-    const conversationStartedAt = runStartLookup(storePaths(io.workdir ?? io.cwd).runs)
-    report = await executeCalibration({ config, labels, rubric, provider, split, selection, conversationStartedAt })
+    report = await executeCalibration({ config, labels, rubric, provider, split, selection, runLookup })
   } catch (e) {
     if (e instanceof ContaminationError || e instanceof SplitViolationError) {
       print(io.stderr, e.message)

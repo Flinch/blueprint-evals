@@ -7,8 +7,8 @@ import {
 } from '../calibration/labels.js'
 import { isApplicable } from '../core/aggregate.js'
 import type { CriterionResult, CriterionVerdict, RunResult } from '../core/interfaces.js'
-import type { Turn } from '../core/trace.js'
-import { renderTranscript } from '../graders/transcript.js'
+import { judgedResponse, type ToolCall, type Turn } from '../core/trace.js'
+import { conversationDate, renderTranscript } from '../graders/transcript.js'
 import type { SuiteRecord } from './suites.js'
 
 // Label storage and the review queue. See docs/design/0003-ui-and-api.md and
@@ -20,7 +20,10 @@ import type { SuiteRecord } from './suites.js'
 //     critique, so the person labelling cannot anchor on the judge. Items are
 //     built field by field (never by spreading a candidate) so a new judge
 //     field cannot leak into one by accident. `revealItem` returns the judge's
-//     verdict, and only for an item that already has a human label.
+//     verdict, and only for an item that already has a human label. The item
+//     does carry what the judge was shown: every turn with its tool calls,
+//     their arguments and results (the judged reply's own calls included), and
+//     the conversation date. The person and the judge see the same evidence.
 //  2. Applicable criteria only. A criterion the judge found not applicable (its
 //     situation never arose) is never offered: a person cannot pass or fail
 //     something that never happened. Such criteria are counted in the stats.
@@ -134,6 +137,8 @@ export type QueueReason = 'random' | 'targeted-failure' | 'targeted-error'
 export interface QueueToolCall {
   name: string
   arguments: Record<string, unknown>
+  /** What the tool returned, as the target reported it. The judge's transcript shows it too (cut to 500 characters there). */
+  result?: unknown
   error?: string
 }
 
@@ -163,10 +168,20 @@ export interface QueueItem {
   input: string
   /** The assistant response being judged: the final assistant reply in the run. */
   output: string
+  /** The tool calls made in the judged reply's own turn, with their arguments and results. Absent when it made none. */
+  outputToolCalls?: QueueToolCall[]
   /** Every turn before `output`, for a labeler who needs the whole conversation. */
   context: QueueTurn[]
   /** Turn index of `output`. */
   outputTurn: number
+  /** Any turns after `output` (an assistant turn with tool calls and no text, say). The judge sees them, so the labeler does too. Absent when there are none. */
+  after?: QueueTurn[]
+  /**
+   * The day the conversation took place, worded as the judge is told it, for
+   * example "Sunday, 15 November 2026 (America/Toronto)". In the config's
+   * timezone. Null when the run's start time is not a valid time.
+   */
+  conversationDate: string | null
   /** The label's `group`: the run, so one conversation never straddles two splits. */
   group: string
   /** Why this item is in the queue. A UI should not show it before the item is labelled: 'targeted-*' hints that the run failed. */
@@ -183,6 +198,8 @@ export interface QueueOptions {
   /** Every line of the label file. Revisions are resolved here, so an item counts once. */
   labels: Label[]
   rubricFor?: RubricLookup
+  /** IANA timezone for `conversationDate`: the config's `timezone`, as the judge uses. Default: the machine's. */
+  timeZone?: string
   /** Page size. Default 25. */
   limit?: number
   seed?: string
@@ -229,24 +246,23 @@ const hex = (...parts: string[]) => createHash('sha256').update(parts.join('\u00
 
 const itemIdOf = (runId: string, criterionId: string) => `${runId}:${criterionId}`
 
-function toQueueTurn(t: Turn): QueueTurn {
+// Field by field, like the item itself: a new ToolCall or Turn field (an id, the raw response) stays out until it is
+// added here on purpose.
+function toQueueToolCall(c: ToolCall): QueueToolCall {
   return {
-    index: t.index,
-    role: t.role,
-    content: t.content,
-    ...(t.toolCalls && t.toolCalls.length > 0
-      ? { toolCalls: t.toolCalls.map(c => ({ name: c.name, arguments: c.arguments, ...(c.error ? { error: c.error } : {}) })) }
-      : {}),
+    name: c.name,
+    arguments: c.arguments,
+    ...(c.result !== undefined ? { result: c.result } : {}),
+    ...(c.error ? { error: c.error } : {}),
   }
 }
 
-/** The judged response is the last assistant reply with text. Everything before it is its input. */
-export function judgedResponse(turns: Turn[]): { output: Turn; before: Turn[] } | undefined {
-  for (let i = turns.length - 1; i >= 0; i--) {
-    const t = turns[i]!
-    if (t.role === 'assistant' && t.content.trim() !== '') return { output: t, before: turns.slice(0, i) }
-  }
-  return undefined
+function toQueueToolCalls(t: Turn): { toolCalls?: QueueToolCall[] } {
+  return t.toolCalls && t.toolCalls.length > 0 ? { toolCalls: t.toolCalls.map(toQueueToolCall) } : {}
+}
+
+function toQueueTurn(t: Turn): QueueTurn {
+  return { index: t.index, role: t.role, content: t.content, ...toQueueToolCalls(t) }
 }
 
 function inputText(before: Turn[]): string {
@@ -258,12 +274,14 @@ function criteriaOf(result: RunResult): CriterionResult[] {
   return result.graders.flatMap(g => (g.status === 'pass' || g.status === 'fail' ? g.criteria ?? [] : []))
 }
 
-function candidatesOf(suite: SuiteRecord, rubricFor: RubricLookup | undefined): { candidates: Candidate[]; notApplicable: string[] } {
+function candidatesOf(suite: SuiteRecord, rubricFor: RubricLookup | undefined, timeZone: string | undefined): { candidates: Candidate[]; notApplicable: string[] } {
   const out: Candidate[] = []
   const notApplicable: string[] = []
   for (const run of suite.results) {
     const found = judgedResponse(run.trace.turns)
     if (!found) continue // nothing to label: LabelSchema needs a non-empty output
+    const outputCalls = toQueueToolCalls(found.output).toolCalls
+    const after = run.trace.turns.slice(found.before.length + 1).map(toQueueTurn)
     const base = {
       suiteId: suite.suiteId,
       runId: run.trace.runId,
@@ -271,8 +289,11 @@ function candidatesOf(suite: SuiteRecord, rubricFor: RubricLookup | undefined): 
       startedAt: run.trace.startedAt,
       input: inputText(found.before),
       output: found.output.content,
+      ...(outputCalls ? { outputToolCalls: outputCalls } : {}),
       context: found.before.map(toQueueTurn),
       outputTurn: found.output.index,
+      ...(after.length > 0 ? { after } : {}),
+      conversationDate: conversationDate(run.trace.startedAt, timeZone) ?? null,
       group: run.trace.runId,
     }
     const rubric = rubricFor?.(run.trace.scenario.id)
@@ -348,7 +369,7 @@ function plan(options: QueueOptions): Plan {
   const skippedNa = new Set<string>()
   const candidates: Candidate[] = []
   for (const suite of options.suites) {
-    const found = candidatesOf(suite, options.rubricFor)
+    const found = candidatesOf(suite, options.rubricFor, options.timeZone)
     for (const id of found.notApplicable) if (!labelledIds.has(id)) skippedNa.add(id)
     for (const c of found.candidates) {
       if (labelledIds.has(c.item.itemId) || seen.has(c.item.itemId)) continue

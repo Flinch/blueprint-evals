@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest'
+import { rmSync } from 'node:fs'
+import { join } from 'node:path'
 import {
-  buildJudgePrompt, ConfigSchema, conversationDateLine, createFakeProvider, createGoalCheck, createPersonaSimulator, createRubricJudge,
-  createRubricLabelJudge, MAX_TOOL_RESULT_CHARS, renderTranscript, RubricSchema, ScenarioSchema,
+  buildJudgePrompt, ConfigSchema, conversationDate, conversationDateLine, createFakeProvider, createGoalCheck, createPersonaSimulator, createRubricJudge,
+  createRubricLabelJudge, evaluateJudge, formatReport, labelEvidence, MAX_TOOL_RESULT_CHARS, renderTranscript, RubricSchema, ScenarioSchema, splitOf,
 } from '../src/index.js'
-import { runStartLookup } from '../src/engine/calibrate.js'
+import { savedRunLookup } from '../src/engine/calibrate.js'
 import { storePaths } from '../src/store/index.js'
 import { agent, makeTrace, user } from './helpers.js'
 import { label } from './label-helpers.js'
@@ -138,30 +140,101 @@ describe('the conversation date in grader prompts', () => {
   })
 })
 
-describe('the conversation date in calibration', () => {
-  const rubric = RubricSchema.parse({ id: 'r', version: 1, criteria: [{ id: 'confirms', text: 'Confirms before acting' }] })
+describe('calibration sees what production grading saw', () => {
+  const rubric = RubricSchema.parse({ id: 'r', version: 1, criteria: [{ id: 'confirms', text: 'Confirms before acting' }, { id: 'other', text: 'Something else' }] })
   const verdict = { json: { verdicts: [{ criterion_id: 'confirms', critique: 'ok', verdict: 'pass' }] } }
+  const STARTED = '2026-11-16T03:00:00.000Z'
+  const turns = [
+    { role: 'user' as const, content: 'Move my appointment to Tuesday.' },
+    { role: 'assistant' as const, content: 'Which time?', toolCalls: [withResult('find_slots', { day: 'Tuesday' }, { status: 'ok' })] },
+    { role: 'user' as const, content: 'Ten.' },
+    { role: 'assistant' as const, content: 'Done, it is moved.', toolCalls: [withResult('reschedule_appointment', { time: '10:00' }, { status: 'invalid_arguments', is_error: true })] },
+  ]
+  /** A store with one saved run, "run-1", and a label made from it the way the review queue makes one. */
+  function store() {
+    const workdir = tempDir('evals-calib-evidence-')
+    saveSuite(workdir, [{ runId: 'run-1', turns, startedAt: STARTED, criteria: { confirms: 'pass' } }], { suiteId: 'suite-1' })
+    return { workdir, runs: storePaths(workdir).runs }
+  }
+  const fromRun = (over = {}) => label({ id: 'run-1:confirms', group: 'run-1', criterion: 'confirms', input: '[0] user: cut-down input', output: 'Done, it is moved.', ...over })
 
-  it('shows no date for a label with no known conversation, never the time of the calibration', async () => {
+  it('judges a label made from a saved run on the whole run: every turn, the judged reply\'s tool call and its result, and the date', async () => {
+    const { runs } = store()
     const p = createFakeProvider(verdict)
-    await createRubricLabelJudge({ rubric, provider: p }).judge(label())
-    expect(p.calls[0]!.messages[0]!.content).not.toContain('The conversation took place')
+    const judge = createRubricLabelJudge({ rubric, provider: p, timeZone: 'America/Toronto', runLookup: savedRunLookup(runs) })
+    expect(judge.evidenceOf!(fromRun())).toBe('fullRun')
+    await judge.judge(fromRun())
+    const prompt = p.calls[0]!.messages[0]!.content
+    expect(prompt).toContain('The conversation took place on Sunday, 15 November 2026 (America/Toronto).')
+    expect(prompt).toContain('[3] assistant: Done, it is moved.\n    tool call: reschedule_appointment({"time":"10:00"})\n    tool result: {"status":"invalid_arguments","is_error":true}')
+    expect(prompt).toContain('tool result: {"status":"ok"}')
+    expect(prompt).not.toContain('cut-down input')
+    // The same transcript, rendered the same way, as production grading gave its judge.
+    expect(prompt).toContain(`<transcript>\n${renderTranscript(makeTrace(turns).turns)}\n</transcript>`)
+    // Only the label's criterion is judged.
+    expect(prompt).toContain('- id: confirms')
+    expect(prompt).not.toContain('- id: other')
   })
 
-  it('shows the run\'s date when the label\'s run is known', async () => {
+  it('falls back to the label text, with no date, for a hand-written label', async () => {
+    const { runs } = store()
     const p = createFakeProvider(verdict)
-    await createRubricLabelJudge({ rubric, provider: p, timeZone: 'America/Toronto', conversationStartedAt: () => '2026-11-16T03:00:00Z' }).judge(label())
-    expect(p.calls[0]!.messages[0]!.content).toContain('The conversation took place on Sunday, 15 November 2026 (America/Toronto).')
+    const judge = createRubricLabelJudge({ rubric, provider: p, timeZone: 'America/Toronto', runLookup: savedRunLookup(runs) })
+    const handWritten = label({ id: 'hand-1', input: 'Move it', output: 'Done.' })
+    expect(judge.evidenceOf!(handWritten)).toBe('labelText')
+    await judge.judge(handWritten)
+    const prompt = p.calls[0]!.messages[0]!.content
+    expect(prompt).toContain('[0] user: Move it\n[1] assistant: Done.')
+    expect(prompt).not.toContain('The conversation took place')
   })
 
-  it('finds a label\'s run in the store by its group, and gives undefined otherwise', () => {
-    const workdir = tempDir('evals-date-')
-    saveSuite(workdir, [{ runId: 'run-1' }])
-    const lookup = runStartLookup(storePaths(workdir).runs)
-    expect(lookup(label({ group: 'run-1' }))).toBe('2026-11-12T00:00:00.000Z')
-    expect(lookup(label({ group: 'not-a-run' }))).toBeUndefined()
-    expect(lookup(label({ group: '../escape' }))).toBeUndefined()
-    expect(lookup(label())).toBeUndefined()
+  it('uses the run only when the label is about it: the queue\'s item id, a saved run, and the same judged reply', () => {
+    const { runs } = store()
+    const lookup = savedRunLookup(runs)
+    expect(labelEvidence(fromRun(), lookup)).toMatchObject({ kind: 'fullRun', runId: 'run-1', run: { startedAt: STARTED } })
+    expect(labelEvidence(fromRun(), undefined).kind).toBe('labelText')
+    expect(labelEvidence(fromRun({ output: 'Some other reply.' }), lookup).kind).toBe('labelText')
+    expect(labelEvidence(fromRun({ id: 'mine-1' }), lookup).kind).toBe('labelText')
+    expect(labelEvidence(fromRun({ id: 'run-2:confirms', group: 'run-2' }), lookup).kind).toBe('labelText')
+    expect(labelEvidence(fromRun({ group: undefined }), lookup).kind).toBe('labelText')
+    // A revision is about the same item, so it is judged on the same run.
+    expect(labelEvidence(fromRun({ id: 'run-1:confirms~r1', replaces: 'run-1:confirms' }), lookup).kind).toBe('fullRun')
+  })
+
+  it('reports how many items took each path, and warns when any used the label text', async () => {
+    const { runs } = store()
+    const p = createFakeProvider(verdict)
+    const judge = createRubricLabelJudge({ rubric, provider: p, runLookup: savedRunLookup(runs) })
+    const split = splitOf(fromRun())
+    // A hand-written label in the same split as the run's label (the split follows the group).
+    const handWritten = label({ id: 'hand-1', group: 'run-1', output: 'Done.' })
+    expect(split).not.toBe('train') // run-1 lands in dev or test, so it can be measured
+    const report = await evaluateJudge([fromRun(), handWritten], judge, { split: split as 'dev' | 'test' })
+    expect(report.evidence).toEqual({ fullRun: 1, labelText: 1 })
+    expect(report.warnings.some(w => w.startsWith("1 of 2 items were judged on the label's text alone"))).toBe(true)
+    expect(formatReport(report)).toContain("Evidence: 1 judged on the whole saved run, 1 on the label's text alone")
+
+    const clean = await evaluateJudge([fromRun()], judge, { split: split as 'dev' | 'test' })
+    expect(clean.evidence).toEqual({ fullRun: 1, labelText: 0 })
+    expect(clean.warnings.some(w => w.includes("label's text alone"))).toBe(false)
+  })
+
+  it('finds saved runs by id, gives undefined otherwise, and reads each run once', () => {
+    const { workdir, runs } = store()
+    const lookup = savedRunLookup(runs)
+    expect(lookup('run-1')).toMatchObject({ startedAt: STARTED, turns: expect.arrayContaining([expect.objectContaining({ content: 'Done, it is moved.' })]) })
+    expect(lookup('not-a-run')).toBeUndefined()
+    expect(lookup('../escape')).toBeUndefined()
+    // Kept for the lookup's life: a run deleted after the first read is still the one judged.
+    rmSync(join(workdir, '.evals'), { recursive: true, force: true })
+    expect(lookup('run-1')?.startedAt).toBe(STARTED)
+    expect(savedRunLookup(runs)('run-1')).toBeUndefined()
+  })
+
+  it('words the date for people as it does for the judge', () => {
+    expect(conversationDate(STARTED, 'America/Toronto')).toBe('Sunday, 15 November 2026 (America/Toronto)')
+    expect(conversationDateLine(STARTED, 'America/Toronto')).toBe(`The conversation took place on ${conversationDate(STARTED, 'America/Toronto')}. Use this only to check claims about days and dates.`)
+    expect(conversationDate('nope')).toBeUndefined()
   })
 })
 

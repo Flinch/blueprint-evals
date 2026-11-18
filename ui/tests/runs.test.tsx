@@ -93,6 +93,12 @@ describe('run detail', () => {
     await waitFor(() => expect(document.getElementById('turn-1')).toHaveClass('flash'))
   })
 
+  it('shows the conversation date the judge was told', async () => {
+    installFetch(baseRoutes({ 'GET /api/runs/run-fail-1': { body: { suiteId: 's3', result: failingRun(), conversationDate: 'Thursday, 12 November 2026 (UTC)' } } }))
+    renderApp('/runs/run-fail-1')
+    expect(await screen.findByText('The conversation took place on Thursday, 12 November 2026 (UTC).')).toBeInTheDocument()
+  })
+
   it('expands a tool call to show its arguments as JSON', async () => {
     const user = userEvent.setup()
     installFetch(route())

@@ -1,3 +1,4 @@
+import { evidenceText, labelTextWarning, type EvidenceCounts } from '../calibration/evaluate.js'
 import type { Config } from '../core/config.js'
 import type { LoadedScenario } from '../core/load.js'
 import type { Scenario } from '../core/scenario.js'
@@ -244,8 +245,12 @@ export function buildRunPreview(config: Config, scenarios: Scenario[], options: 
   return { lines, anyModelCalls: true, data }
 }
 
-/** What `evals calibrate` is about to do. One judge call per label, so the call count is exact. */
-export function buildCalibratePreview(config: Config, judgements: number, split: string, selection: string): Preview {
+/**
+ * What `evals calibrate` is about to do. One judge call per label, so the call
+ * count is exact. With `evidence`, it also says how many items the judge will
+ * see the whole saved run for, and warns when some get only the label's text.
+ */
+export function buildCalibratePreview(config: Config, judgements: number, split: string, selection: string, evidence?: EvidenceCounts): Preview {
   const m = config.models.judge
   const data: PreviewData = {
     kind: 'calibrate',
@@ -268,7 +273,17 @@ export function buildCalibratePreview(config: Config, judgements: number, split:
   }
   data.models.judge = modelPlan(config, 'judge')
   lines.push(`  Judge: ${m.model}, ${effortText(m.effort, DEFAULT_EFFORT.judge)}`)
-  const note = 'There is no cost cap on calibration: the number of calls is fixed, but their size depends on the label text.'
+  if (evidence) {
+    const text = `${evidenceText(evidence)}.`
+    lines.push(`  ${text}`)
+    data.notes.push(text)
+    if (evidence.labelText > 0) {
+      const w = labelTextWarning(evidence.labelText, judgements)
+      lines.push(`  WARNING: ${w}`)
+      data.warnings.push(w)
+    }
+  }
+  const note = 'There is no cost cap on calibration: the number of calls is fixed, but their size depends on the length of each conversation or label.'
   lines.push(`  ${note}`)
   data.notes.push(note)
   const unpriced = unpricedWarnings(config, ['judge'], 'Its cost will be reported as unknown.')

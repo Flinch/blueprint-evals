@@ -1,7 +1,7 @@
 import { createRubricJudge } from '../graders/rubric-judge.js'
 import type { ModelProvider } from '../core/interfaces.js'
 import { ScenarioSchema, type Anchor, type Rubric } from '../core/scenario.js'
-import { addUsage, ZERO_USAGE, type Effort, type Trace, type Turn, type Usage } from '../core/trace.js'
+import { addUsage, judgedResponse, ZERO_USAGE, type Effort, type Trace, type Turn, type Usage } from '../core/trace.js'
 import { FRAMEWORK_VERSION } from '../core/version.js'
 import { checkLabels, contentKey, itemIdOfLabel, resolveLabels, splitOf, type Label, type Split } from './labels.js'
 import { computeMetrics, type Metrics, type Verdict } from './metrics.js'
@@ -23,6 +23,23 @@ export interface LabelJudge {
   anchors: Anchor[]
   /** Judges one label's response. Throws on failure, which is reported and kept out of the metrics. */
   judge(label: Label): Promise<LabelJudgement>
+  /** What this judge is shown for a label (see LabelEvidence). A judge that has it gets `evidence` counts in its report. */
+  evidenceOf?(label: Label): LabelEvidenceKind
+}
+
+/**
+ * What a calibration judge is shown for one label.
+ *  - fullRun: the whole saved run the label was made from, as the production
+ *    judge saw it (every turn, tool calls with their results, the date).
+ *  - labelText: only the label's own `input` and `output`, for a hand-written
+ *    label or one whose run is not saved here.
+ */
+export type LabelEvidenceKind = 'fullRun' | 'labelText'
+
+/** How many measured items were judged on each kind of evidence. */
+export interface EvidenceCounts {
+  fullRun: number
+  labelText: number
 }
 
 export class ContaminationError extends Error {
@@ -87,6 +104,12 @@ export interface CalibrationReport {
   errors: { id: string; reason: string }[]
   /** Labels changed after the first save, and the rates on the blind labels. Absent from reports saved before revisions existed. */
   revisions?: RevisionSummary
+  /**
+   * How many of the selected items the judge saw the whole saved run for, and
+   * how many only the label's text. Absent from reports saved before this
+   * existed, and for a judge that does not say (see LabelJudge.evidenceOf).
+   */
+  evidence?: EvidenceCounts
   /** Spend on the judge calls. null if any price was unknown. */
   usage: Usage
   warnings: string[]
@@ -132,6 +155,9 @@ export async function evaluateJudge(all: Label[], judge: LabelJudge, options: Ev
   const inSplit = labels.filter(l => splitOf(l) === options.split)
   const eligible = selection === 'random' ? inSplit.filter(l => l.sampled_by === 'random') : inSplit
   const excludedTargeted = inSplit.length - eligible.length
+
+  // Decided before any judging, from the same lookups the judge uses, so the counts describe every selected item.
+  const evidence: EvidenceCounts | undefined = judge.evidenceOf ? countEvidence(eligible, l => judge.evidenceOf!(l)) : undefined
 
   const items: EvaluatedItem[] = []
   const errors: { id: string; reason: string }[] = []
@@ -179,6 +205,7 @@ export async function evaluateJudge(all: Label[], judge: LabelJudge, options: Ev
   if (revisions.revised > 0) {
     warnings.push(`${revisions.revised} of the measured labels were changed after the judge's answer was available. The rates use the changed labels; the rates on the original, blind labels are reported next to them.`)
   }
+  if (evidence && evidence.labelText > 0) warnings.push(labelTextWarning(evidence.labelText, eligible.length))
   warnings.push(...metrics.warnings)
 
   return {
@@ -192,9 +219,25 @@ export async function evaluateJudge(all: Label[], judge: LabelJudge, options: Ev
     disagreements: items.filter(i => !i.agree),
     errors,
     revisions,
+    ...(evidence ? { evidence } : {}),
     usage,
     warnings,
   }
+}
+
+/** Counts labels by the evidence their judge is shown. */
+export function countEvidence(labels: Label[], kindOf: (label: Label) => LabelEvidenceKind): EvidenceCounts {
+  const counts: EvidenceCounts = { fullRun: 0, labelText: 0 }
+  for (const l of labels) counts[kindOf(l)]++
+  return counts
+}
+
+/** The warning a report and a preview give when some items are judged on the label text alone. */
+export function labelTextWarning(labelText: number, of: number): string {
+  return (
+    `${labelText} of ${of} items were judged on the label's text alone, because no saved run matches them (a hand-written label, or a run that is not saved here). ` +
+    'The production judge sees the whole conversation, with tool results and the date, so for these items calibration measures a judge that saw less.'
+  )
 }
 
 // ----------------------------------------------------- a rubric as a judge
@@ -207,13 +250,42 @@ export interface RubricLabelJudgeOptions {
   /** IANA timezone for the conversation date line. Default: the machine's. */
   timeZone?: string
   /**
-   * When the conversation a label came from started (ISO time), if known: for
-   * a label made from a run, that run's `startedAt`. The judge is then told the
-   * conversation date, as it is in a run. Without it, or when it returns
-   * undefined, the date line is left out: the judge is never shown a date that
-   * is not the conversation's.
+   * Finds a saved run by its id. A label made from a saved run is then judged
+   * on that whole run, as production grading saw it (see labelEvidence).
+   * Without it, or when it finds nothing, the judge sees only the label's
+   * input and output, and no date: it is never shown a date that is not the
+   * conversation's.
    */
-  conversationStartedAt?: (label: Label) => string | undefined
+  runLookup?: SavedRunLookup
+}
+
+/** A saved run's conversation, as the production judge was shown it. */
+export interface SavedConversation {
+  /** When the run started (ISO time). The date line comes from it. */
+  startedAt: string
+  turns: Turn[]
+}
+
+/** A saved run by its id, or undefined when there is none. */
+export type SavedRunLookup = (runId: string) => SavedConversation | undefined
+
+export type LabelEvidence = { kind: 'fullRun'; runId: string; run: SavedConversation } | { kind: 'labelText' }
+
+/**
+ * Which evidence the calibration judge is given for a label. The whole saved
+ * run when all of these hold, else the label's own text:
+ *  - the label was made from a run: it has a `group` (the run id) and its item
+ *    id is `<group>:<criterion>`, the id the review queue gives;
+ *  - that run is found;
+ *  - the run's judged reply (its last assistant reply with text) is the
+ *    label's `output`, so the run is the one the label is about.
+ */
+export function labelEvidence(label: Label, runLookup: SavedRunLookup | undefined): LabelEvidence {
+  const runId = label.group
+  if (!runLookup || runId === undefined || itemIdOfLabel(label) !== `${runId}:${label.criterion}`) return { kind: 'labelText' }
+  const run = runLookup(runId)
+  if (!run || judgedResponse(run.turns)?.output.content !== label.output) return { kind: 'labelText' }
+  return { kind: 'fullRun', runId, run }
 }
 
 const STUB_SCENARIO = ScenarioSchema.parse({ id: 'calibration', version: 1, target: 'calibration', seed_message: 'calibration' })
@@ -224,12 +296,18 @@ const STUB_SCENARIO = ScenarioSchema.parse({ id: 'calibration', version: 1, targ
  * examples that illustrate it. That is how the post builds judges, and it keeps
  * a label from costing a judgement of every criterion. Calibration stays
  * binary: the judge here is not offered `not_applicable`.
+ *
+ * A label made from a saved run is judged on that whole run: the same turns,
+ * rendered the same way (tool calls with their results) and with the same date
+ * line as in production grading. Other labels are judged on their input and
+ * output alone, with no date.
  */
 export function createRubricLabelJudge(options: RubricLabelJudgeOptions): LabelJudge {
-  const { rubric, provider, effort, timeoutMs, timeZone, conversationStartedAt } = options
+  const { rubric, provider, effort, timeoutMs, timeZone, runLookup } = options
   return {
     name: `rubric-judge(${rubric.id}@${rubric.version})`,
     anchors: rubric.anchors,
+    evidenceOf: label => labelEvidence(label, runLookup).kind,
 
     async judge(label: Label): Promise<LabelJudgement> {
       const criterion = rubric.criteria.find(c => c.id === label.criterion)
@@ -243,10 +321,14 @@ export function createRubricLabelJudge(options: RubricLabelJudgeOptions): LabelJ
       }
 
       const now = new Date().toISOString()
-      const startedAt = conversationStartedAt?.(label)
+      const evidence = labelEvidence(label, runLookup)
+      const startedAt = evidence.kind === 'fullRun' ? evidence.run.startedAt : undefined
       const turns: Turn[] = []
-      if (label.input !== undefined) turns.push({ index: turns.length, role: 'user', content: label.input, at: now })
-      turns.push({ index: turns.length, role: 'assistant', content: label.output, at: now })
+      if (evidence.kind === 'fullRun') turns.push(...evidence.run.turns)
+      else {
+        if (label.input !== undefined) turns.push({ index: turns.length, role: 'user', content: label.input, at: now })
+        turns.push({ index: turns.length, role: 'assistant', content: label.output, at: now })
+      }
       const trace: Trace = {
         schemaVersion: 1,
         runId: label.id,
@@ -286,6 +368,11 @@ const rate = (name: string, r: Metrics['tpr']) =>
     ? `${name}: n/a (no ${name === 'True negative rate' ? 'expert-fail' : 'expert-pass'} labels)`
     : `${name}: ${pct(r.rate)} [${pct(r.interval[0])} to ${pct(r.interval[1])}] (${r.successes} of ${r.n})`
 
+/** One line saying what the judge was shown, for a report or a preview. */
+export function evidenceText(e: EvidenceCounts): string {
+  return `Evidence: ${e.fullRun} judged on the whole saved run, ${e.labelText} on the label's text alone`
+}
+
 /** A plain-text report for a terminal. The disagreements are listed because reading them is the point. */
 export function formatReport(report: CalibrationReport): string {
   const { metrics: m } = report
@@ -299,6 +386,7 @@ export function formatReport(report: CalibrationReport): string {
     `Cohen's kappa: ${m.kappa === null ? 'n/a' : m.kappa.toFixed(2)}`,
     m.insufficient ? 'Status: INSUFFICIENT SAMPLE, do not rely on these numbers.' : 'Status: sample size adequate',
   ]
+  if (report.evidence) lines.push(evidenceText(report.evidence))
   const rv = report.revisions
   if (rv && rv.revised > 0 && rv.blindMetrics) {
     const b = rv.blindMetrics

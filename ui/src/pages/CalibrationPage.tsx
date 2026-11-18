@@ -97,6 +97,14 @@ export function CalibrationReportView({ record }: { record: CalibrationRecord })
           <dt>Split</dt><dd>{r.split}</dd>
           <dt>Selection</dt><dd>{r.selection === 'random' ? 'random labels only' : 'all labels, including targeted'}</dd>
           <dt>Measured</dt><dd>{m.n} of {r.inSplit} labels in the split{r.excludedTargeted > 0 ? `, ${r.excludedTargeted} targeted left out` : ''}</dd>
+          {r.evidence ? (
+            <>
+              <dt>Evidence</dt>
+              <dd data-testid="evidence">
+                {r.evidence.fullRun} judged on the whole saved run, {r.evidence.labelText} on the label's text alone
+              </dd>
+            </>
+          ) : null}
           <dt>Saved</dt><dd>{fullDate(record.at)}</dd>
           <dt>Labels file</dt><dd className="break">{record.labelsFile}</dd>
         </dl>

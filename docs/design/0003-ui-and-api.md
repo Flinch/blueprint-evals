@@ -166,7 +166,9 @@ calls:
    hash of each scenario and rubric, in run order), the cost cap, both models
    with their efforts and prices, the timeouts, and a hash of each target's
    config. For a calibration: the rubric, the split, the selection, a hash of
-   the label set, and the judge model. For a findings summary
+   the label set, what each item will be judged on (a hash of its saved run, or
+   its label text; see [Calibration](#calibration)), the timezone, and the judge
+   model. For a findings summary
    (`/api/findings/summary/preview`): a hash of the findings (which includes the
    filters), the judge model with its price and timeout, and the output cap. It
    also covers an expiry, 15 minutes out.
@@ -174,7 +176,8 @@ calls:
    body plus `previewToken` and `confirm: true`. The server rebuilds the plan from
    the files as they are **now**, recomputes the HMAC and compares. A plan that
    changed (a different selection, a higher cap, an edited scenario, a new price,
-   new labels), an expired token and a token from another server all fail.
+   new labels, a saved run that a label is judged on disappearing), an expired
+   token and a token from another server all fail.
 
 | Situation | Answer |
 |---|---|
@@ -295,9 +298,13 @@ first, with `total` before paging. `status` is `pass`, `fail` or `error`. Each i
 lists `failedCriteria` and, apart from them, `notApplicableCriteria`: criteria that
 were not graded in that run. The two lists never share an id.
 
-**`GET /api/runs/:runId`** returns `RunResponse`: `{ suiteId, result }` where
+**`GET /api/runs/:runId`** returns `RunResponse`: `{ suiteId, result, conversationDate }` where
 `result` is a full `RunResult` (trace with turns, tool calls and raw responses,
-every grader result with criteria and critiques, cost, models, warnings).
+every grader result with criteria and critiques, cost, models, warnings), and
+`conversationDate` is the day the conversation took place, worded as LLM graders
+are told it (for example "Sunday, 15 November 2026 (America/Toronto)"), in the
+config's `timezone` (the machine's when it has none or there is no usable
+config). It is null when the run's start time is not a valid time.
 
 ### Scenarios and rubrics
 
@@ -523,9 +530,25 @@ The labels are the server's label file. `contamination` is non-null when the
 judge's few-shot examples include dev or test labels, and start will refuse.
 `preview.judgements.count` is exact.
 
+The judge is shown what production grading saw (see "The same evidence for
+everyone" in [0002](0002-judge-methodology.md#the-same-evidence-for-everyone)).
+A label made from a saved run (its item id is `<group>:<criterion>`, the run is
+in `.evals/runs`, and the run's judged reply is the label's `output`) is judged on
+that whole run: every turn with tool calls and results, and the date line in the
+config's timezone. Any other label is judged on its own input and output, with no
+date. The preview's lines and notes say how many items take each path
+("Evidence: 3 judged on the whole saved run, 1 on the label's text alone."), and
+its warnings say so when any item uses the label text. The token covers each
+item's path and a hash of its run, so a run that disappears or changes after the
+preview makes start answer 412. The server reads each run once per request, so
+the calibration measures exactly what the token covered.
+
 **`POST /api/calibrate/start`** takes `CalibrateStartRequest` and returns 200
 `CalibrateStartResponse` (`{ record }`, a `CalibrationRecord` holding the
-`CalibrationReport`) when the measurement finishes. It is a single long request.
+`CalibrationReport`) when the measurement finishes. The report's `evidence` is
+`{ fullRun, labelText }`: how many of the measured items the judge saw the whole
+saved run for, and how many only the label's text, with a warning when the
+second is above zero. Reports saved before this existed have no `evidence`. It is a single long request.
 It follows the same confirmation protocol, refuses a contaminated judge with 409
 `contamination` before any spend, and needs no provider when there are no labels
 to judge. It holds the one-job lock while it runs. Low rates are a result, not an
@@ -672,6 +695,29 @@ id with a `~r<n>` suffix, and the item stays labelled. The `output` is the final
 assistant reply in the run, and everything before it is the input. `group` is the
 run id, so every criterion of one conversation lands in the same train, dev or
 test split.
+
+An item carries the evidence the judge is shown, so the person labelling sees
+what the judge sees:
+
+- `context`: every turn before the reply, each with its tool calls
+  (`QueueToolCall`: `name`, `arguments`, `result` when the target reported one,
+  `error` when the call failed). `input` is the same turns rendered as the judge
+  gets them, results included.
+- `outputToolCalls`: the tool calls made in the judged reply's own turn, with
+  their results. Absent when it made none.
+- `after`: any turns after the reply (an assistant turn with tool calls and no
+  text, say). Absent when there are none.
+- `conversationDate`: the day the conversation took place, worded as the judge's
+  date line words it, in the config's `timezone`. Null when the run's start time
+  is not a valid time.
+
+These are built field by field from the trace, like the rest of the item, so a
+tool call's id, a turn's raw response and anything from the judge stay out. The
+page shows the date at the top of the item and each tool call compactly under
+its turn: the name, the arguments on one line, the result's `status` as a badge
+(an error status, `is_error`, or a call that errored, in the error style), and
+the full JSON when the call is opened. In the All labels list, a label made from
+a run can load the whole conversation from `GET /api/runs/:runId` the same way.
 
 A run whose judge never decided some criterion (an `error` run) contributes those
 criteria with `reason: 'targeted-error'`, taking the criterion list from the
@@ -1350,6 +1396,8 @@ export interface RunsResponse {
 export interface RunResponse {
   suiteId: string
   result: RunResult
+  /** The day the conversation took place, worded as LLM graders are told it, in the config's timezone. Null when the start time is not a valid time. */
+  conversationDate: string | null
 }
 
 // --------------------------------------------------- scenarios and rubrics

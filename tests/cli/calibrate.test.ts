@@ -2,7 +2,8 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { runCli } from '../../src/cli/main.js'
 import { createFakeProvider, partition } from '../../src/index.js'
-import { syntheticLabels } from '../label-helpers.js'
+import { idInSplit, label, syntheticLabels } from '../label-helpers.js'
+import { saveSuite } from '../ui/records.js'
 import { exampleConfigFor, harness, labelJudgeProvider, rubricYaml, tempDir, toJsonl, writeFiles } from './harness.js'
 
 const labels = syntheticLabels(400)
@@ -203,5 +204,37 @@ describe('evals calibrate', () => {
     expect(provider.calls).toHaveLength(randomIn(dev))
     expect(h.stdout()).toMatch(/Changed after seeing the judge: 2 of these labels \(2 changed the verdict\)/)
     expect(h.stdout()).toMatch(/On the original, blind labels: accuracy 100%/)
+  })
+
+  describe('evidence', () => {
+    const runId = idInSplit('dev', 'run')
+    const STARTED = '2026-11-16T03:00:00.000Z'
+    const turns = [
+      { role: 'user' as const, content: 'Cancel my Thursday visit.' },
+      { role: 'assistant' as const, content: 'It is cancelled.', toolCalls: [{ name: 'cancel_appointment', arguments: { day: 'Thursday' }, result: { status: 'no_active_appointment', is_error: true } }] },
+    ]
+    const fromRun = label({ id: `${runId}:confirms`, group: runId, criterion: 'confirms', input: 'Cancel my Thursday visit.', output: 'It is cancelled.', verdict: 'fail' })
+    const handWritten = label({ id: idInSplit('dev', 'hand'), criterion: 'confirms', input: 'Move it', output: 'Done.', verdict: 'pass' })
+
+    it('judges a label made from a saved run on the whole run with its date, falls back for a hand-written one, and says how many took each path', async () => {
+      const cwd = workspace({ 'evals.config.yaml': `${exampleConfigFor('http://127.0.0.1:1')}\ntimezone: America/Toronto\n`, 'labels.jsonl': toJsonl([fromRun, handWritten]) })
+      saveSuite(cwd, [{ runId, turns, startedAt: STARTED, criteria: { confirms: 'fail' } }])
+      const provider = createFakeProvider({ json: { verdicts: [{ criterion_id: 'confirms', critique: 'ok', verdict: 'fail' }] } })
+      const h = harness({ cwd, provider })
+      expect(await runCli([...base, '--split', 'dev', '--yes'], h.io)).toBe(0)
+      expect(provider.calls).toHaveLength(2)
+      const prompts = provider.calls.map(c => c.messages[0]!.content)
+      const full = prompts.find(p => p.includes('cancel_appointment'))!
+      expect(full).toContain('The conversation took place on Sunday, 15 November 2026 (America/Toronto).')
+      expect(full).toContain('[1] assistant: It is cancelled.\n    tool call: cancel_appointment({"day":"Thursday"})\n    tool result: {"status":"no_active_appointment","is_error":true}')
+      const fallback = prompts.find(p => p.includes('[1] assistant: Done.'))!
+      expect(fallback).not.toContain('The conversation took place')
+      const out = h.stdout()
+      // In the preview, before anything is spent, and in the report.
+      expect(out.indexOf("Evidence: 1 judged on the whole saved run, 1 on the label's text alone.")).toBeGreaterThanOrEqual(0)
+      expect(out).toMatch(/WARNING: 1 of 2 items were judged on the label's text alone/)
+      expect(out).toMatch(/Evidence: 1 judged on the whole saved run, 1 on the label's text alone\n/)
+      expect(out).toMatch(/  - 1 of 2 items were judged on the label's text alone/)
+    })
   })
 })

@@ -82,3 +82,16 @@ export function addUsage(a: Usage, b: Usage): Usage {
     costUsd: a.costUsd === null || b.costUsd === null ? null : a.costUsd + b.costUsd,
   }
 }
+
+/**
+ * The response a human label or a review item is about: the last assistant
+ * reply with text. Everything before it is its input. Undefined when the
+ * conversation has no such reply.
+ */
+export function judgedResponse(turns: Turn[]): { output: Turn; before: Turn[] } | undefined {
+  for (let i = turns.length - 1; i >= 0; i--) {
+    const t = turns[i]!
+    if (t.role === 'assistant' && t.content.trim() !== '') return { output: t, before: turns.slice(0, i) }
+  }
+  return undefined
+}

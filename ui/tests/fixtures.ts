@@ -230,6 +230,7 @@ export const queueItem = (over: Partial<QueueItem> = {}): QueueItem => ({
   output: 'Okay, I have cancelled it for you.',
   context: [{ index: 0, role: 'user', content: 'I think I need to cancel my appointment.' }],
   outputTurn: 1,
+  conversationDate: 'Thursday, 12 November 2026 (UTC)',
   group: 'run-fail-1',
   reason: 'targeted-failure',
   ...over,

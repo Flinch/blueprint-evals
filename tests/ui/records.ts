@@ -1,6 +1,6 @@
 import { join } from 'node:path'
 import { createSuiteWriter, storePaths, type SuiteRecord } from '../../src/store/index.js'
-import type { CriterionResult, CriterionVerdict, GraderResult, RunResult, RunStatus } from '../../src/index.js'
+import type { CriterionResult, CriterionVerdict, GraderResult, RunResult, RunStatus, ToolCall } from '../../src/index.js'
 import { makeTrace } from '../helpers.js'
 
 export interface RunSpec {
@@ -13,7 +13,7 @@ export interface RunSpec {
   costUsd?: number | null
   goalAchieved?: boolean | null
   /** Overrides the default one-exchange conversation. */
-  turns?: { role: 'user' | 'assistant'; content: string }[]
+  turns?: { role: 'user' | 'assistant'; content: string; toolCalls?: ToolCall[] }[]
   error?: string
   /** When the run started. Defaults to the trace helper's time. */
   startedAt?: string
@@ -26,7 +26,7 @@ export function runResult(spec: RunSpec): RunResult {
     { role: 'user' as const, content: `Question for ${spec.runId}` },
     { role: 'assistant' as const, content: `Answer for ${spec.runId}` },
   ]
-  const trace = makeTrace(turns.map(t => ({ role: t.role, content: t.content })))
+  const trace = makeTrace(turns.map(t => ({ role: t.role, content: t.content, ...('toolCalls' in t && t.toolCalls ? { toolCalls: t.toolCalls } : {}) })))
   trace.runId = spec.runId
   if (spec.startedAt) trace.startedAt = spec.startedAt
   trace.scenario = { id: spec.scenario ?? 'scenario-a', version: '1' }

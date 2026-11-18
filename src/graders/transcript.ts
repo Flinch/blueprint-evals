@@ -61,17 +61,29 @@ export function localTimeZone(): string {
 }
 
 /**
- * The line that tells an LLM grader what day the conversation happened, so it
- * can check claims such as "the clinic is closed today" or "next Tuesday is the
- * 24th". Derived from the trace's `startedAt`, in `timeZone` (default: the
- * machine's). Returns undefined when the start is unknown or not a valid time,
- * and the caller then leaves the line out.
+ * The day a conversation took place, as LLM graders are told it and as a
+ * person labelling it is shown it: for example "Sunday, 15 November 2026
+ * (America/Toronto)". Derived from the trace's `startedAt`, in `timeZone`
+ * (default: the machine's). Undefined when the start is unknown or not a
+ * valid time.
  */
-export function conversationDateLine(startedAt: string | undefined, timeZone: string = localTimeZone()): string | undefined {
+export function conversationDate(startedAt: string | undefined, timeZone: string = localTimeZone()): string | undefined {
   if (startedAt === undefined) return undefined
   const at = new Date(startedAt)
   if (Number.isNaN(at.getTime())) return undefined
   const parts = new Intl.DateTimeFormat('en-US', { timeZone, weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' }).formatToParts(at)
   const part = (type: Intl.DateTimeFormatPartTypes) => parts.find(p => p.type === type)?.value ?? ''
-  return `The conversation took place on ${part('weekday')}, ${part('day')} ${part('month')} ${part('year')} (${timeZone}). Use this only to check claims about days and dates.`
+  return `${part('weekday')}, ${part('day')} ${part('month')} ${part('year')} (${timeZone})`
+}
+
+/**
+ * The line that tells an LLM grader what day the conversation happened, so it
+ * can check claims such as "the clinic is closed today" or "next Tuesday is the
+ * 24th". The date is `conversationDate`. Returns undefined when the start is
+ * unknown or not a valid time, and the caller then leaves the line out.
+ */
+export function conversationDateLine(startedAt: string | undefined, timeZone: string = localTimeZone()): string | undefined {
+  const date = conversationDate(startedAt, timeZone)
+  if (date === undefined) return undefined
+  return `The conversation took place on ${date}. Use this only to check claims about days and dates.`
 }
