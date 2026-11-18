@@ -241,7 +241,7 @@ function toQueueTurn(t: Turn): QueueTurn {
 }
 
 /** The judged response is the last assistant reply with text. Everything before it is its input. */
-function judgedResponse(turns: Turn[]): { output: Turn; before: Turn[] } | undefined {
+export function judgedResponse(turns: Turn[]): { output: Turn; before: Turn[] } | undefined {
   for (let i = turns.length - 1; i >= 0; i--) {
     const t = turns[i]!
     if (t.role === 'assistant' && t.content.trim() !== '') return { output: t, before: turns.slice(0, i) }

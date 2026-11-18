@@ -410,6 +410,8 @@ a.run-row:hover, .run-row:hover { background: var(--card2); }
 @media (max-width: 700px) { .cols-2 { grid-template-columns: minmax(0, 1fr); } }
 .crit-box { border: 1px solid var(--border); background: var(--bg2); padding: 0.7rem 0.9rem; font-size: 0.86rem; white-space: pre-wrap; overflow-wrap: anywhere; }
 .crit-box h4 { font-family: var(--font-mono); font-size: 0.68rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); margin-bottom: 0.3rem; font-weight: 500; }
+.finding-reply { margin: 0; border-left: 3px solid var(--accent-border); }
+.example-form textarea { min-height: 5rem; }
 
 /* CLASSIFY */
 .review-panel { background: var(--card); border: 1px solid var(--border); }

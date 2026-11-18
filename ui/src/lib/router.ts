@@ -37,6 +37,11 @@ export function criterionHref(criterion: string, rubric?: string | null): string
   return href('/scenarios', { tab: 'rubrics', rubric: rubric ?? undefined, criterion })
 }
 
+/** The Findings page with its filters in the address, so a reload or a shared link keeps them. */
+export function findingsHref(filters: { since?: string; rubric?: string; criterion?: string } = {}): string {
+  return href('/findings', filters)
+}
+
 export interface Router extends Location {
   navigate(to: string, opts?: { replace?: boolean }): void
 }

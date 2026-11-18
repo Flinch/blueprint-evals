@@ -120,6 +120,48 @@ system under test, such as clinic details and the rules its tools follow.
   rules being graded (those are the criteria) and not the system's own
   instructions, and nothing private that the criteria forbid revealing.
 
+### Tool results and the conversation date
+
+Calibration of the health-bot judge found two disagreements caused by what the
+judge was shown, while its reasoning was sound. It had no date, so it misjudged
+an assistant that said "the clinic is closed today" on a Sunday, and it could
+not check weekday claims such as "next Tuesday". And it saw each tool call with
+its arguments but never the result, so it could not tell whether "it's booked"
+followed a `booked` status or an error.
+
+- **Tool results.** `renderTranscript` prints a `tool result:` line after each
+  call that has one, as compact JSON cut to 500 characters. JSON keeps a result
+  on one line, so it cannot pose as a new turn. Results come from the system
+  under test, so they stay inside the untrusted `<transcript>` block and the
+  closing-tag defusing covers them. A target reports results through the
+  optional `result` path of its tool-call mapping (see
+  [0001](0001-m0-core-interfaces.md#target)). A call without one renders as it
+  did before. The user simulator still sees tool calls without results, since a
+  real user never sees what a tool returned.
+- **The conversation date.** The rubric judge and the goal check get one line
+  before the transcript, for example "The conversation took place on Sunday,
+  15 November 2026 (America/Toronto). Use this only to check claims about days
+  and dates." It comes from the trace's `startedAt`, in the config's
+  `timezone`, which defaults to the machine's local timezone. That timezone
+  must match the one the system under test uses for "today": the health bot
+  uses UTC, so its configs set `timezone: UTC`. The goal check gets the line
+  too, because a goal such as "booked for next Tuesday" depends on the date.
+  The line sits outside the transcript because the framework, not the system
+  under test, supplies it.
+- **Calibration.** A label holds only an input and an output, so the label
+  judge has no conversation start of its own. When a label was made from a
+  saved run (its `group` is the run id), `evals calibrate` looks the run up and
+  uses its `startedAt`. Otherwise the line is left out, so the judge is never
+  shown the day of the calibration as if it were the day of the conversation.
+  The web UI's calibration does not look runs up yet.
+- **No date, no line.** When no date is known the line is omitted, and the
+  prompt is byte-identical to the one before this change.
+
+Both change what the judge sees. The judge's name, `rubric-judge(<id>@<version>)`,
+records only the rubric, and there is no separate prompt version, so nothing in
+a result marks the change: grades and calibration reports from before and after
+it are not directly comparable.
+
 ### Length is a code check
 
 An LLM judge cannot count words. It estimated about 175 words for a 159-word
@@ -342,6 +384,48 @@ calibration report) to the criterion on the Scenarios page, where the rubric can
 be edited. The edit writes the rubric file, bumps its version and says how many
 labels were made against the old wording (see
 [0003](0003-ui-and-api.md#editing-a-rubric)).
+
+### Worked examples from labels
+
+A clearer worked example is often the fix for a judge that misread the rubric.
+The web UI turns a label into one with a button ("Use as worked example", see
+[0003](0003-ui-and-api.md#worked-examples-from-labels)), under the same rules
+as `anchorsFromLabels`:
+
+- **Only train labels.** Dev and test labels are what calibration measures the
+  judge on. A judge that was shown one of them would be graded on an example it
+  has seen, so the button is disabled on them and the server refuses them
+  (`not_train`). The server also refuses an example whose input and output match
+  a dev or test label under another group, the same check the contamination
+  guard makes before a calibration.
+- **Adding one changes the judge.** The example is appended to the rubric's
+  `anchors`, the version goes up, and the judge sees it on every grading call
+  from then on. Earlier calibrations measured the old judge, so run calibration
+  on `dev` again after adding examples, and keep `test` for when the judge has
+  settled.
+- **It costs a little more.** Every worked example is in the prompt of every
+  grading call, so each call has more input. A handful of sharp examples beats
+  many similar ones.
+- The label itself is unchanged. The example is a copy, and the person can trim
+  the transcript or tidy the critique before adding it. The verdict always comes
+  from the label.
+
+### Two loops
+
+The labels feed two different fixes, and it helps to keep them apart:
+
+- **Fixing the system under test.** A label that fails a reply, with its
+  critique, is a verified bug report. The findings report (the Findings page and
+  `GET /api/findings`, see [0003](0003-ui-and-api.md#the-findings-report)) collects these by
+  criterion for the developers who own the assistant. Judge failures nobody has
+  reviewed stay out of it.
+- **Fixing the judge.** A label the judge disagrees with is evidence about the
+  judge or the rubric. It feeds rubric wording and worked examples, followed by a
+  new calibration on `dev`.
+
+A fail label where the judge agreed belongs to the first loop only. A
+disagreement can belong to both: the reply may be a real failure that the judge
+missed.
 
 ### Judge identity and variability
 

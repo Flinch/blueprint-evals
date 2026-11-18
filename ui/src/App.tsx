@@ -2,10 +2,11 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react
 import type { HealthResponse } from '../../src/ui/api-types'
 import { ApiFailure, api } from './api/client'
 import { Banner, Loading } from './components/ui'
-import { href, stripTokenFromUrl, useLocation } from './lib/router'
+import { findingsHref, href, stripTokenFromUrl, useLocation } from './lib/router'
 import { applyTheme, initialTheme, saveTheme, type Theme } from './lib/theme'
 import { CalibrationPage } from './pages/CalibrationPage'
 import { ClassifyPage } from './pages/ClassifyPage'
+import { FindingsPage } from './pages/FindingsPage'
 import { LaunchPage } from './pages/LaunchPage'
 import { OverviewPage } from './pages/OverviewPage'
 import { RunDetailPage } from './pages/RunDetailPage'
@@ -67,6 +68,7 @@ const NAV: { path: string; label: string; match: (p: string) => boolean }[] = [
   { path: '/runs', label: 'Runs', match: p => p === '/runs' || p.startsWith('/runs/') },
   { path: '/launch', label: 'Run scenarios', match: p => p === '/launch' },
   { path: '/classify', label: 'Classify', match: p => p.startsWith('/classify') },
+  { path: '/findings', label: 'Findings', match: p => p === '/findings' },
   { path: '/calibration', label: 'Calibration', match: p => p === '/calibration' },
   { path: '/scenarios', label: 'Scenarios', match: p => p === '/scenarios' },
 ]
@@ -120,6 +122,15 @@ function Shell({ health, theme, onTheme }: { health: HealthResponse; theme: Them
       )
     }
     if (p === '/classify/labels') return <ClassifyPage tab="labels" onTab={t => loc.navigate(t === 'labels' ? '/classify/labels' : '/classify')} />
+    if (p === '/findings') {
+      const q = loc.query
+      return (
+        <FindingsPage
+          initial={{ since: q.get('since') ?? undefined, rubric: q.get('rubric') ?? undefined, criterion: q.get('criterion') ?? undefined }}
+          onFilters={f => loc.navigate(findingsHref(f), { replace: true })}
+        />
+      )
+    }
     if (p === '/calibration') return <CalibrationPage />
     if (p === '/scenarios') return <ScenariosPage link={{ tab: loc.query.get('tab'), rubric: loc.query.get('rubric'), criterion: loc.query.get('criterion') }} />
     return (

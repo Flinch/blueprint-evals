@@ -47,7 +47,8 @@ export function installFetch(routes: Routes): Fake {
           : handler
         : failure(404, 'not_found', `No route ${key} in the fake server.`)
       const status = reply.status ?? 200
-      const text = JSON.stringify(reply.body)
+      // A string body is sent as it is (the findings Markdown); anything else as JSON.
+      const text = typeof reply.body === 'string' ? reply.body : JSON.stringify(reply.body)
       return {
         ok: status >= 200 && status < 300,
         status,
@@ -136,7 +137,7 @@ export function baseRoutes(over: Routes = {}): Routes {
     'GET /api/rubrics': { body: rubrics() },
     'GET /api/run/status': { body: { activeJob: null } satisfies RunStatusResponse },
     'GET /api/queue': { body: queue() },
-    'GET /api/labels': { body: { file: '/work/demo/.evals/labels.jsonl', labels: [], history: {}, stats: labelStatsFixture() } },
+    'GET /api/labels': { body: { file: '/work/demo/.evals/labels.jsonl', labels: [], history: {}, meta: {}, stats: labelStatsFixture() } },
     'GET /api/labels/suggestions': { body: { suggestions: [], fromOtherLabelers: false } },
     'GET /api/calibration': { body: { latest: calibrationRecord() } },
     ...over,

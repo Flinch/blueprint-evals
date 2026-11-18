@@ -15,6 +15,8 @@ export interface RunSpec {
   /** Overrides the default one-exchange conversation. */
   turns?: { role: 'user' | 'assistant'; content: string }[]
   error?: string
+  /** When the run started. Defaults to the trace helper's time. */
+  startedAt?: string
 }
 
 export const critiqueOf = (runId: string, criterion: string) => `JUDGE-CRITIQUE[${runId}/${criterion}]`
@@ -26,6 +28,7 @@ export function runResult(spec: RunSpec): RunResult {
   ]
   const trace = makeTrace(turns.map(t => ({ role: t.role, content: t.content })))
   trace.runId = spec.runId
+  if (spec.startedAt) trace.startedAt = spec.startedAt
   trace.scenario = { id: spec.scenario ?? 'scenario-a', version: '1' }
   trace.metadata = { frameworkVersion: 'test', models: { judge: { provider: 'fake', model: 'judge-model' } }, ...(spec.tags ? { tags: spec.tags } : {}) }
   const criteria: CriterionResult[] = Object.entries(spec.criteria ?? {}).map(([id, verdict]) => ({

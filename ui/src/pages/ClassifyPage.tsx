@@ -1,9 +1,10 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { Label, LabelStats, LabelSuggestionsResponse, QueueItem, QueueStats, RevealResponse } from '../../../src/ui/api-types'
+import type { Label, LabelMeta, LabelStats, LabelSuggestionsResponse, QueueItem, QueueStats, RevealResponse } from '../../../src/ui/api-types'
 import { api, describeError, isApiFailure } from '../api/client'
 import { useAsync } from '../api/useAsync'
 import { TurnView } from './RunDetailPage'
 import { Banner, CriticalMarker, EmptyState, ErrorState, Loading, PageHead, Tabs, VerdictBadge, Warnings } from '../components/ui'
+import { SplitBadge, WorkedExampleAction } from '../components/WorkedExample'
 import { percent, plural, shortDate } from '../lib/format'
 import { criterionHref, runHref } from '../lib/router'
 import { readStored, writeStored } from '../lib/storage'
@@ -625,6 +626,8 @@ export function QueueView({
   const [skipped, setSkipped] = useState(0)
   const [linkMissing, setLinkMissing] = useState(false)
   const [reviseChips, setReviseChips] = useState(0)
+  // The saved label's split and example status, fetched after the reveal, so nothing about it shows before labelling.
+  const [itemMeta, setItemMeta] = useState<LabelMeta | null>(null)
   const critiqueRef = useRef<HTMLTextAreaElement>(null)
   // The deep-link id that has been acted on, so a reload of the list does not move that item to the front again.
   const linkHandled = useRef<string | undefined>(undefined)
@@ -676,6 +679,7 @@ export function QueueView({
     setTried(false)
     setProblem(null)
     setShowContext(false)
+    setItemMeta(null)
   }
 
   /** Whether the current item can be left: never mid-save, and a typed draft only after asking. */
@@ -789,6 +793,10 @@ export function QueueView({
     }
   }, [current, phase, valid, verdict, errors.critique, labeler, critique])
 
+  const loadItemMeta = (itemId: string) => {
+    api.labels().then(l => setItemMeta(l.meta?.[itemId] ?? null)).catch(() => setItemMeta(null))
+  }
+
   const doReveal = useCallback(async () => {
     if (!current || phase !== 'saved') return
     setPhase('revealing')
@@ -796,6 +804,7 @@ export function QueueView({
       const r = await api.reveal(current.itemId)
       setReveal(r)
       setPhase('revealed')
+      loadItemMeta(current.itemId)
     } catch (e) {
       setPhase('saved')
       setProblem(describeError(e))
@@ -1078,6 +1087,12 @@ export function QueueView({
                 {reveal ? (
                   <>
                     <RevealView reveal={reveal} criterion={{ id: current.criterion.id, rubricId: rubricOf(current.scenarioId) }} />
+                    {itemMeta && saved ? (
+                      <div className="row" aria-label="Worked example">
+                        <SplitBadge split={itemMeta.split} />
+                        <WorkedExampleAction key={saved.id} label={saved} itemId={current.itemId} meta={itemMeta} onAdded={() => loadItemMeta(current.itemId)} />
+                      </div>
+                    ) : null}
                     {phase === 'revising' && saved ? (
                       <ReviseForm
                         itemId={current.itemId}
@@ -1139,6 +1154,7 @@ export function LabelsView() {
 
   const all = labels.data?.labels ?? []
   const history = labels.data?.history ?? {}
+  const meta = labels.data?.meta ?? {}
   const rows = useMemo(() => {
     const words = search.trim().toLowerCase().split(/\s+/).filter(Boolean)
     return all
@@ -1230,7 +1246,7 @@ export function LabelsView() {
           ) : (
             <div className="table-wrap">
               <table>
-                <thead><tr><th>Verdict</th><th>Criterion</th><th>Sampled</th><th>Labeler</th><th>When</th><th><span className="sr-only">Details</span></th></tr></thead>
+                <thead><tr><th>Verdict</th><th>Criterion</th><th>Split</th><th>Sampled</th><th>Labeler</th><th>When</th><th><span className="sr-only">Details</span></th></tr></thead>
                 <tbody>
                   {rows.map(l => {
                     const itemId = itemIdOf(l)
@@ -1248,6 +1264,14 @@ export function LabelsView() {
                             </div>
                           </td>
                           <td><div className="mono small break">{l.criterion}</div><div className="small muted break">{itemId}</div></td>
+                          <td>
+                            {meta[itemId] ? (
+                              <div className="row" style={{ gap: '0.3rem' }}>
+                                <SplitBadge split={meta[itemId].split} />
+                                {meta[itemId].isExample ? <span className="badge badge-accent" title="A worked example in its rubric">Example</span> : null}
+                              </div>
+                            ) : null}
+                          </td>
                           <td className="small">{l.sampled_by}</td>
                           <td className="small">{l.labeler}</td>
                           <td className="small">{shortDate(l.at)}</td>
@@ -1255,7 +1279,7 @@ export function LabelsView() {
                         </tr>
                         {isOpen ? (
                           <tr>
-                            <td colSpan={6} style={{ background: 'var(--bg2)' }}>
+                            <td colSpan={7} style={{ background: 'var(--bg2)' }}>
                               <div className="stack">
                                 {l.input ? <div className="crit-box"><h4>Input</h4>{l.input}</div> : null}
                                 <div className="crit-box"><h4>Output</h4>{l.output}</div>
@@ -1269,6 +1293,7 @@ export function LabelsView() {
                                   </div>
                                 ) : null}
                                 {l.group ? <div className="small muted">Group: <span className="mono">{l.group}</span></div> : null}
+                                <WorkedExampleAction key={l.id} label={l} itemId={itemId} meta={meta[itemId]} onAdded={labels.reload} />
                                 {revising === itemId ? (
                                   <ReviseForm itemId={itemId} criterion={l.criterion} current={l} idPrefix="revise-list" onSaved={() => onRevised(itemId)} onCancel={() => setRevising(null)} />
                                 ) : null}

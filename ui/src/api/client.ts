@@ -1,6 +1,6 @@
 import type {
-  ApiErrorBody, CalibratePreviewResponse, CalibrateRequest, CalibrateStartRequest, CalibrateStartResponse, CalibrationResponse, ErrorCode,
-  HealthResponse, LabelRequest, LabelResponse, LabelsResponse, LabelSuggestionsResponse, OverviewResponse, QueueResponse, RevealResponse, ReviseRequest, RubricsResponse,
+  AnchorFromLabelRequest, AnchorFromLabelResponse, ApiErrorBody, CalibratePreviewResponse, CalibrateRequest, CalibrateStartRequest, CalibrateStartResponse, CalibrationResponse, ErrorCode,
+  FindingsResponse, FindingsSummaryPreviewResponse, FindingsSummaryRequest, FindingsSummaryResponse, FindingsSummaryStartRequest, HealthResponse, LabelRequest, LabelResponse, LabelsResponse, LabelSuggestionsResponse, OverviewResponse, QueueResponse, RevealResponse, ReviseRequest, RubricsResponse,
   RubricUpdateRequest, RubricUpdateResponse, RunCancelResponse, RunPreviewResponse, RunRequest, RunResponse, RunsResponse, RunStartRequest, RunStartResponse, RunStatusResponse,
   ScenariosResponse, SuiteResponse, SuitesResponse,
 } from '../../../src/ui/api-types'
@@ -63,6 +63,28 @@ async function request<T>(method: 'GET' | 'POST' | 'PUT', path: string, body?: u
   return json as T
 }
 
+/** A GET whose success body is text (the findings Markdown). A failure is still ApiErrorBody. */
+async function requestText(path: string): Promise<string> {
+  let res: Response
+  try {
+    res = await fetch(path, { method: 'GET', credentials: 'same-origin', headers: { accept: 'text/markdown, application/json' } })
+  } catch {
+    throw new ApiFailure(0, 'network', 'Could not reach the evals server. It may have stopped.')
+  }
+  const text = await res.text()
+  if (!res.ok) {
+    let json: unknown
+    try {
+      json = JSON.parse(text)
+    } catch {
+      json = undefined
+    }
+    if (isErrorBody(json)) throw new ApiFailure(res.status, json.error.code, json.error.message, json.error.details)
+    throw new ApiFailure(res.status, 'bad_response', `The server answered ${res.status}.`)
+  }
+  return text
+}
+
 const get = <T>(path: string, signal?: AbortSignal) => request<T>('GET', path, undefined, signal)
 const post = <T>(path: string, body: unknown = {}) => request<T>('POST', path, body)
 const put = <T>(path: string, body: unknown) => request<T>('PUT', path, body)
@@ -107,6 +129,11 @@ export const api = {
   calibratePreview: (body: CalibrateRequest) => post<CalibratePreviewResponse>('/api/calibrate/preview', body),
   calibrateStart: (body: CalibrateStartRequest) => post<CalibrateStartResponse>('/api/calibrate/start', body),
   calibration: () => get<CalibrationResponse>('/api/calibration'),
+  anchorFromLabel: (rubricId: string, body: AnchorFromLabelRequest) => post<AnchorFromLabelResponse>(`/api/rubrics/${encodeURIComponent(rubricId)}/anchors/from-label`, body),
+  findings: (q: FindingsSummaryRequest = {}) => get<FindingsResponse>(`/api/findings${qs({ ...q })}`),
+  findingsMarkdown: (q: FindingsSummaryRequest = {}) => requestText(`/api/findings.md${qs({ ...q })}`),
+  findingsSummaryPreview: (body: FindingsSummaryRequest) => post<FindingsSummaryPreviewResponse>('/api/findings/summary/preview', body),
+  findingsSummary: (body: FindingsSummaryStartRequest) => post<FindingsSummaryResponse>('/api/findings/summary', body),
 }
 
 /** A sentence for an error, for the places that only show one. */

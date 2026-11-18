@@ -4,27 +4,32 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from 'node:net'
 import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { z } from 'zod'
-import { ContaminationError } from '../calibration/evaluate.js'
-import { itemIdOfLabel, LabelChainError, resolveLabels, revisionId, SplitViolationError, type Label } from '../calibration/labels.js'
+import { contaminationProblem, ContaminationError } from '../calibration/evaluate.js'
+import {
+  contentKey, isExampleOf, itemIdOfLabel, LabelChainError, resolveLabels, revisionId, splitOf, SplitViolationError, type Label,
+} from '../calibration/labels.js'
+import type { Anchor, Rubric } from '../core/scenario.js'
 import { FRAMEWORK_VERSION } from '../core/version.js'
 import type { Config } from '../core/config.js'
 import type { ModelProvider, Reporter } from '../core/interfaces.js'
 import { loadConfig, loadScenarios } from '../core/load.js'
 import { loadLabels } from '../calibration/labels.js'
 import { executeCalibration, planCalibration } from '../engine/calibrate.js'
+import { buildSummaryPrompt, estimateSummary, summariseFindings, SummaryFailedError } from '../engine/findings-summary.js'
 import { loadCatalog, type Catalog, type LoadedRubric } from '../engine/catalog.js'
 import { UsageError } from '../engine/errors.js'
 import { providerErrors, crossCheck, modelNeeds, needsModel } from '../engine/plan.js'
 import { executeRun, planRun, PlanProblemsError, type RunPlan } from '../engine/run.js'
 import { defaultProvider } from '../cli/common.js'
 import {
-  appendLabel, buildQueue, CorruptRecordError, createSuiteWriter, critiqueSuggestions, DuplicateLabelError, findQueueItem, findRun, InvalidIdError, labelStats,
-  LabelValidationError, latestCalibration, listLabels, listSuites, readSuite, readSuites, revealItem, saveCalibration, storePaths,
-  type QueueOptions, type RubricLookup, type SuiteWriter,
+  appendLabel, buildFindings, buildQueue, CorruptRecordError, createSuiteWriter, critiqueSuggestions, DuplicateLabelError, findingsFileName, findingsMarkdown,
+  findQueueItem, findRun, InvalidIdError, labelStats, LabelValidationError, latestCalibration, listFindingsSummaries, listLabels, listSuites, readSuite,
+  readSuites, revealItem, sameFilters, saveCalibration, saveFindingsSummary, storePaths,
+  type FindingsFilters, type FindingsReport, type QueueOptions, type RubricLookup, type SuiteWriter,
 } from '../store/index.js'
 import type {
-  ActiveJob, ApiErrorBody, CalibratePreviewResponse, CalibrateStartResponse, CalibrationResponse, ErrorCode, HealthResponse, LabelResponse,
-  LabelImpact, LabelsResponse, LabelSuggestionsResponse, OverviewResponse, QueueResponse, RevealResponse, RubricItem, RubricsResponse, RubricUpdateResponse, RunCancelResponse,
+  ActiveJob, AnchorFromLabelResponse, ApiErrorBody, CalibratePreviewResponse, CalibrateStartResponse, CalibrationResponse, ErrorCode, FindingsResponse,
+  FindingsSummaryPreviewResponse, FindingsSummaryResponse, HealthResponse, LabelMeta, LabelResponse, LabelImpact, LabelsResponse, LabelSuggestionsResponse, OverviewResponse, QueueResponse, RevealResponse, RubricItem, RubricsResponse, RubricUpdateResponse, RunCancelResponse,
   RunPreviewResponse, RunResponse, RunsResponse, RunStartResponse, RunStatusResponse, ScenariosResponse, SuiteResponse, SuitesResponse,
 } from '../ui/api-types.js'
 import {
@@ -32,7 +37,7 @@ import {
 } from './http.js'
 import { createPreviewTokens, digest } from './preview-token.js'
 import { createScrubber, secretValues } from './redact.js'
-import { applyRubricEdit, sha256 } from './rubric-edit.js'
+import { appendAnchorEdit, applyRubricEdit, parseRubricSource, sha256 } from './rubric-edit.js'
 import { createSecurity, LOOPBACK_HOST, type Security } from './security.js'
 import { createEventHub } from './sse.js'
 import { writeFileAtomic } from '../store/fs.js'
@@ -89,6 +94,7 @@ export const API_ROUTES = [
   'GET /api/scenarios',
   'GET /api/rubrics',
   'PUT /api/rubrics/:id',
+  'POST /api/rubrics/:id/anchors/from-label',
   'POST /api/run/preview',
   'POST /api/run/start',
   'GET /api/run/status',
@@ -103,6 +109,10 @@ export const API_ROUTES = [
   'POST /api/calibrate/preview',
   'POST /api/calibrate/start',
   'GET /api/calibration',
+  'GET /api/findings',
+  'GET /api/findings.md',
+  'POST /api/findings/summary/preview',
+  'POST /api/findings/summary',
 ] as const
 
 const MAX_BODY = 1024 * 1024
@@ -149,6 +159,32 @@ const RubricUpdateSchema = z.strictObject({
   anchors: z.array(z.unknown()).max(1000),
   version: z.string().trim().min(1).max(100).optional(),
 })
+
+const AnchorFromLabelSchema = z.strictObject({
+  itemId: z.string().min(1).max(300),
+  baseHash: z.string().regex(/^[0-9a-f]{64}$/, 'baseHash must be the hash from GET /api/rubrics'),
+  input: z.string().max(200_000).optional(),
+  output: z.string().max(200_000).refine(s => s.trim() !== '', 'output must not be blank').optional(),
+  critique: z.string().trim().min(1, 'critique must not be blank').max(20_000).optional(),
+})
+
+const findingsShape = { since: z.string().max(100).optional(), rubric: z.string().max(200).optional(), criterion: z.string().max(200).optional() }
+const FindingsSummaryRequestSchema = z.strictObject(findingsShape)
+const FindingsSummaryStartSchema = z.strictObject({ ...findingsShape, ...startShape })
+
+/** The report's filters, from a query or a body. Blank is absent; `since` is a date (taken as midnight UTC) or an ISO time. */
+function findingsFilters(raw: { since?: string; rubric?: string; criterion?: string }): FindingsFilters {
+  const filters: FindingsFilters = {}
+  const since = raw.since?.trim()
+  if (since) {
+    const ms = Date.parse(/^\d{4}-\d{2}-\d{2}$/.test(since) ? `${since}T00:00:00.000Z` : since)
+    if (Number.isNaN(ms)) throw new ApiError(400, 'bad_request', '"since" must be a date such as 2026-11-01, or an ISO time.')
+    filters.since = new Date(ms).toISOString()
+  }
+  if (raw.rubric?.trim()) filters.rubric = raw.rubric.trim()
+  if (raw.criterion?.trim()) filters.criterion = raw.criterion.trim()
+  return filters
+}
 
 function parseBody<T extends z.ZodType>(schema: T, body: unknown): z.infer<T> {
   const parsed = schema.safeParse(body)
@@ -233,6 +269,8 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServer>
 
   let security!: Security
   let active: ActiveState | null = null
+  /** A findings summary is one model call. One at a time, so a double click cannot pay twice. */
+  let summarising = false
 
   /** Rebuilt per call: the config can change under a running server, and so can the environment. */
   const scrubber = (): Scrub => createScrubber(secretValues(env, configFile))
@@ -315,6 +353,127 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServer>
       hash,
       usedBy: cat.scenarios.filter(l => l.rubric?.id === r.rubric.id).map(l => l.scenario.id),
     }
+  }
+
+  /**
+   * The rubric a criterion of a scenario's runs belongs to: the scenario's own
+   * rubric when it has the criterion, else the only loaded rubric that does.
+   * Built once per request from one catalog read.
+   */
+  function criterionLookup(cat: Catalog | null): (scenarioId: string | undefined, criterion: string) => Rubric | undefined {
+    const byScenario = new Map((cat?.scenarios ?? []).flatMap(l => (l.rubric ? [[l.scenario.id, l.rubric] as const] : [])))
+    const rubrics = (cat?.rubrics ?? []).map(r => r.rubric)
+    return (scenarioId, criterion) => {
+      const own = scenarioId !== undefined ? byScenario.get(scenarioId) : undefined
+      if (own?.criteria.some(c => c.id === criterion)) return own
+      const having = rubrics.filter(r => r.criteria.some(c => c.id === criterion))
+      return having.length === 1 ? having[0] : undefined
+    }
+  }
+
+  /** Run id to scenario id, over the saved runs the queue reads. */
+  function scenarioOfRuns(suites: { results: { trace: { runId: string; scenario: { id: string } } }[] }[]): Map<string, string> {
+    const out = new Map<string, string>()
+    for (const s of suites) for (const r of s.results) if (!out.has(r.trace.runId)) out.set(r.trace.runId, r.trace.scenario.id)
+    return out
+  }
+
+  /**
+   * The one file a rubric was loaded from, read for an edit. Checks that it is
+   * inside the allowed roots and that its hash is `baseHash`. The client never
+   * names a path.
+   */
+  function rubricForWrite(id: string, baseHash: string): { file: string; real: string; source: string } {
+    const found = catalog()?.rubrics.filter(r => r.rubric.id === id) ?? []
+    if (found.length === 0) throw new ApiError(404, 'not_found', `No rubric "${id}".`)
+    if (found.length > 1) {
+      throw new ApiError(422, 'rubric_invalid', `More than one file defines rubric "${id}" (${found.map(r => shownPath(r.file)).join(', ')}). Give each its own id before editing it here.`)
+    }
+    const file = found[0]!.file
+    let real: string
+    let bytes: Buffer
+    try {
+      real = realpathSync(file)
+      bytes = readFileSync(real)
+    } catch {
+      throw new ApiError(409, 'stale', `${shownPath(file)} is gone since the page read it. Reload to see what is there now.`)
+    }
+    if (!insideAllowedRoots(real)) {
+      throw new ApiError(422, 'rubric_invalid', `${shownPath(file)} is outside the working directory, the config directory and the scenarios path, so the page does not write it. Edit it in your editor.`)
+    }
+    if (sha256(bytes) !== baseHash) {
+      throw new ApiError(409, 'stale', `${shownPath(file)} changed on disk since the page read it, so nothing was saved. Reload to see the current file, then make the edit again.`)
+    }
+    return { file, real, source: bytes.toString('utf8') }
+  }
+
+  /** Writes an applied edit atomically and returns the rubric as GET /api/rubrics now shows it. */
+  function writeRubric(target: { file: string; real: string }, applied: { text: string; rubric: Rubric }): RubricItem {
+    try {
+      writeFileAtomic(target.real, applied.text)
+    } catch (e) {
+      throw new ApiError(500, 'store_unwritable', `Cannot write ${shownPath(target.file)}: ${message(e)}. The file was not changed.`)
+    }
+    const cat = catalog()
+    const fresh = cat?.rubrics.find(r => r.file === target.file)
+    return fresh && cat ? rubricItem(fresh, cat) : { rubric: applied.rubric, file: target.file, relativeFile: shownPath(target.file), hash: sha256(applied.text), usedBy: [] }
+  }
+
+  // ---- findings
+
+  function findingsReport(filters: FindingsFilters): { report: FindingsReport; warnings: string[] } {
+    const { suites, warnings } = readSuites(paths.runs, 200)
+    const lookup = criterionLookup(catalog())
+    const { all } = readResolved()
+    const report = buildFindings({
+      suites,
+      labels: all,
+      filters,
+      rubricFor: (scenarioId, criterion) => {
+        const r = lookup(scenarioId, criterion)
+        const c = r?.criteria.find(x => x.id === criterion)
+        return r && c ? { id: r.id, version: r.version, text: c.text, critical: c.critical } : undefined
+      },
+    })
+    return { report, warnings }
+  }
+
+  /** What a draft is written from. A draft whose fingerprint differs from the report's was written from other findings. */
+  const findingsDigest = (report: FindingsReport) =>
+    digest({
+      filters: report.filters,
+      criteria: report.criteria.map(c => ({
+        criterion: c.criterion, text: c.text, critical: c.critical, rubricId: c.rubricId, rubricVersion: c.rubricVersion,
+        findings: c.findings.map(f => ({ itemId: f.itemId, userMessage: f.userMessage, output: f.output, critique: f.critique })),
+      })),
+    })
+
+  function latestDraft(report: FindingsReport): FindingsResponse['summary'] {
+    const record = listFindingsSummaries(paths.findings).find(r => sameFilters(r.filters, report.filters))
+    return record ? { record, current: record.fingerprint === findingsDigest(report) } : null
+  }
+
+  const queryFilters = (query: URLSearchParams) =>
+    findingsFilters({ since: textParam(query, 'since', 100), rubric: textParam(query, 'rubric', 200), criterion: textParam(query, 'criterion', 200) })
+
+  function summaryPlan(request: z.infer<typeof FindingsSummaryRequestSchema>) {
+    const config = loadCfg()
+    const problems = providerErrors(config, false, true)
+    if (problems.length > 0) throw new ApiError(422, 'plan_invalid', problems.join('\n'), { errors: problems })
+    const { report } = findingsReport(findingsFilters(request))
+    const prompt = buildSummaryPrompt(report)
+    const estimate = estimateSummary(config, prompt)
+    const findings = findingsDigest(report)
+    // The findings decide what is sent. A new or changed label changes them, so it needs a new preview.
+    const fingerprint = {
+      kind: 'findings-summary',
+      findings,
+      judge: config.models.judge,
+      pricing: config.pricing[config.models.judge.model] ?? null,
+      timeoutMs: config.timeouts.judgeMs,
+      maxOutputTokens: estimate.maxOutputTokens,
+    }
+    return { config, report, prompt, estimate, findings, fingerprint }
   }
 
   // ---- run planning (shared by preview and start)
@@ -548,29 +707,9 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServer>
     // Writes the one file the rubric was loaded from. The client never names a path.
     'PUT /api/rubrics/:id': async ({ req, params }) => {
       const request = parseBody(RubricUpdateSchema, await readJson(req, maxBody))
-      const id = params.id!
-      const found = catalog()?.rubrics.filter(r => r.rubric.id === id) ?? []
-      if (found.length === 0) throw new ApiError(404, 'not_found', `No rubric "${id}".`)
-      if (found.length > 1) {
-        throw new ApiError(422, 'rubric_invalid', `More than one file defines rubric "${id}" (${found.map(r => shownPath(r.file)).join(', ')}). Give each its own id before editing it here.`)
-      }
-      const file = found[0]!.file
-      let real: string
-      let bytes: Buffer
-      try {
-        real = realpathSync(file)
-        bytes = readFileSync(real)
-      } catch {
-        throw new ApiError(409, 'stale', `${shownPath(file)} is gone since the page read it. Reload to see what is there now.`)
-      }
-      if (!insideAllowedRoots(real)) {
-        throw new ApiError(422, 'rubric_invalid', `${shownPath(file)} is outside the working directory, the config directory and the scenarios path, so the page does not write it. Edit it in your editor.`)
-      }
-      if (sha256(bytes) !== request.baseHash) {
-        throw new ApiError(409, 'stale', `${shownPath(file)} changed on disk since the page read it, so nothing was saved. Reload to see the current file, then make the edit again.`)
-      }
+      const target = rubricForWrite(params.id!, request.baseHash)
       // Everything from here to the write is synchronous, so two edits cannot both pass the hash check.
-      const applied = applyRubricEdit(bytes.toString('utf8'), request)
+      const applied = applyRubricEdit(target.source, request)
 
       // Counted before the write, from the same current labels calibration uses. It is information only, so a bad label file does not stop the save.
       const warnings: string[] = []
@@ -582,16 +721,48 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServer>
         warnings.push(`The labels could not be counted, so the number made against the old wording is unknown: ${message(e)}`)
       }
 
-      try {
-        writeFileAtomic(real, applied.text)
-      } catch (e) {
-        throw new ApiError(500, 'store_unwritable', `Cannot write ${shownPath(file)}: ${message(e)}. The file was not changed.`)
-      }
-
-      const cat = catalog()
-      const fresh = cat?.rubrics.find(r => r.file === file)
-      const item = fresh && cat ? rubricItem(fresh, cat) : { rubric: applied.rubric, file, relativeFile: shownPath(file), hash: sha256(applied.text), usedBy: [] }
+      const item = writeRubric(target, applied)
       const body: RubricUpdateResponse = { item, version: item.rubric.version, hash: item.hash, labelImpact, warnings }
+      return { body }
+    },
+
+    // One label becomes one worked example, written through the same span-preserving editor as PUT.
+    'POST /api/rubrics/:id/anchors/from-label': async ({ req, params }) => {
+      const request = parseBody(AnchorFromLabelSchema, await readJson(req, maxBody))
+      const id = params.id!
+      const { current: all } = readResolved()
+      const label = all.find(l => itemIdOfLabel(l) === request.itemId)
+      if (!label) throw new ApiError(404, 'not_labelled', `Item "${request.itemId}" has no label. Label it first.`)
+      const split = splitOf(label)
+      if (split !== 'train') {
+        throw new ApiError(
+          422,
+          'not_train',
+          `This label is in the ${split} split. Only training labels can become worked examples, so dev and test stay unseen by the judge and calibration stays an honest check.`,
+        )
+      }
+      const target = rubricForWrite(id, request.baseHash)
+      // Everything from here to the write is synchronous, so two additions cannot both pass the hash check.
+      const rubric = parseRubricSource(target.source)
+      if (!rubric.criteria.some(c => c.id === label.criterion)) {
+        throw new ApiError(422, 'not_in_rubric', `The label is about "${label.criterion}", which is not a criterion of rubric "${id}". Known: ${rubric.criteria.map(c => c.id).join(', ')}.`)
+      }
+      const input = request.input !== undefined ? request.input : label.input
+      const anchor: Anchor = {
+        criterion: label.criterion,
+        ...(input !== undefined && input.trim() !== '' ? { input } : {}),
+        output: request.output ?? label.output,
+        verdict: label.verdict,
+        critique: request.critique ?? label.critique.trim(),
+      }
+      if (rubric.anchors.some(a => contentKey(a) === contentKey(anchor) || isExampleOf(a, label))) {
+        throw new ApiError(409, 'duplicate_example', `Rubric "${id}" already has a worked example with this input and output, so nothing was added.`)
+      }
+      const contaminated = contaminationProblem(all, [anchor])
+      if (contaminated) throw new ApiError(409, 'contamination', `${contaminated} Nothing was added.`)
+      const applied = applyRubricEdit(target.source, appendAnchorEdit(rubric, anchor))
+      const item = writeRubric(target, applied)
+      const body: AnchorFromLabelResponse = { item, version: item.rubric.version, hash: item.hash, anchor }
       return { body }
     },
 
@@ -713,7 +884,16 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServer>
 
     'GET /api/labels': () => {
       const { all, current, history } = readResolved()
-      const body: LabelsResponse = { file: labelsFile, labels: current, history: Object.fromEntries(history), stats: labelStats(all) }
+      const scenarioOf = scenarioOfRuns(readSuites(paths.runs, 200).suites)
+      const lookup = criterionLookup(catalog())
+      const meta: Record<string, LabelMeta> = {}
+      for (const l of current) {
+        const itemId = itemIdOfLabel(l)
+        const colon = itemId.indexOf(':')
+        const rubric = lookup(colon > 0 ? scenarioOf.get(itemId.slice(0, colon)) : undefined, l.criterion)
+        meta[itemId] = { split: splitOf(l), rubricId: rubric?.id ?? null, isExample: rubric ? rubric.anchors.some(a => isExampleOf(a, l)) : false }
+      }
+      const body: LabelsResponse = { file: labelsFile, labels: current, history: Object.fromEntries(history), meta, stats: labelStats(all) }
       return { body }
     },
 
@@ -837,6 +1017,96 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServer>
     'GET /api/calibration': () => {
       const body: CalibrationResponse = { latest: latestCalibration(paths.calibration) }
       return { body }
+    },
+
+    'GET /api/findings': ({ query }) => {
+      const { report, warnings } = findingsReport(queryFilters(query))
+      const body: FindingsResponse = { ...report, summary: latestDraft(report), warnings }
+      return { body }
+    },
+
+    // The same report as a Markdown file. The latest draft for these filters is included only while the findings are the ones it was written from.
+    'GET /api/findings.md': ({ res, query }) => {
+      const { report } = findingsReport(queryFilters(query))
+      const draft = latestDraft(report)
+      const text = scrubber()(findingsMarkdown(report, draft?.current ? draft.record : null))
+      res.writeHead(200, {
+        ...BASE_HEADERS,
+        'content-type': 'text/markdown; charset=utf-8',
+        'content-length': Buffer.byteLength(text),
+        'content-disposition': `attachment; filename="${findingsFileName(report)}"`,
+      })
+      res.end(text)
+      return 'handled'
+    },
+
+    'POST /api/findings/summary/preview': async ({ req }) => {
+      const request = parseBody(FindingsSummaryRequestSchema, await readJson(req, maxBody))
+      const p = summaryPlan(request)
+      const { token, expiresAt } = tokens.issue(p.fingerprint)
+      const findings = p.report.criteria.reduce((n, c) => n + c.findings.length, 0)
+      const warnings: string[] = []
+      if (findings === 0) warnings.push('There are no findings in this filter, so there is nothing to summarise.')
+      if (p.prompt.omitted > 0) warnings.push(`${p.prompt.omitted} older findings are left out of the prompt: it holds at most 25 per criterion, newest first.`)
+      if (p.estimate.estimatedCostUsd === null) warnings.push(`There is no price for model "${p.estimate.model.model}" in the config, so the cost is unknown.`)
+      const body: FindingsSummaryPreviewResponse = {
+        filters: p.report.filters,
+        findings,
+        findingsInPrompt: p.prompt.itemIds.length,
+        criteria: p.report.criteria.length,
+        model: p.estimate.model,
+        estimatedInputTokens: p.estimate.estimatedInputTokens,
+        maxOutputTokens: p.estimate.maxOutputTokens,
+        estimatedCostUsd: p.estimate.estimatedCostUsd,
+        anyModelCalls: findings > 0,
+        warnings,
+        previewToken: token,
+        expiresAt: new Date(expiresAt).toISOString(),
+      }
+      return { body }
+    },
+
+    'POST /api/findings/summary': async ({ req }) => {
+      const request = parseBody(FindingsSummaryStartSchema, await readJson(req, maxBody))
+      if (summarising) throw new ApiError(409, 'run_in_progress', 'A findings summary is already being written. Wait for it to finish.')
+      const { previewToken: _t, confirm: _c, ...filters } = request
+      const p = summaryPlan(filters)
+      if (p.report.criteria.length === 0) throw new ApiError(422, 'no_findings', 'There are no findings in this filter, so there is nothing to summarise. Nothing was spent.')
+      requireConfirmation(true, request, p.fingerprint)
+      const provider = createProviderOrThrow(p.config)
+
+      summarising = true
+      const work = (async () => {
+        try {
+          let result
+          try {
+            result = await summariseFindings({ config: p.config, report: p.report, prompt: p.prompt, provider })
+          } catch (e) {
+            if (e instanceof SummaryFailedError) throw new ApiError(502, 'provider_error', `${e.message} Nothing was saved.`)
+            throw e
+          }
+          try {
+            return saveFindingsSummary(paths.findings, {
+              filters: p.report.filters,
+              fingerprint: p.findings,
+              findings: p.prompt.itemIds.length,
+              itemIds: p.prompt.itemIds,
+              model: { provider: result.model.provider, model: result.model.model, effort: p.estimate.model.effort, ...(result.model.servedBy ? { servedBy: result.model.servedBy } : {}) },
+              usage: result.usage,
+              fixes: result.fixes,
+              warnings: result.warnings,
+            })
+          } catch (e) {
+            throw new ApiError(500, 'store_unwritable', `The summary was written but could not be saved: ${message(e)}`)
+          }
+        } finally {
+          summarising = false
+        }
+      })()
+      pending.add(work)
+      void work.then(() => pending.delete(work), () => pending.delete(work))
+      const body: FindingsSummaryResponse = { record: await work }
+      return { status: 201, body }
     },
   }
 

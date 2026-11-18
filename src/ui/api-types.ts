@@ -11,19 +11,21 @@
 
 import type { CalibrationReport } from '../calibration/evaluate.js'
 import type { Label, Split } from '../calibration/labels.js'
-import type { EnvRef, ModelNeeds, PreviewData } from '../engine/plan.js'
+import type { EnvRef, ModelNeeds, ModelPlan, PreviewData } from '../engine/plan.js'
 import type { CriterionVerdict, GraderResult, RunResult, RunStatus } from '../core/interfaces.js'
 import type { Anchor, Rubric, Scenario } from '../core/scenario.js'
 import type { Turn } from '../core/trace.js'
 import type { CalibrationRecord } from '../store/calibration.js'
+import type { CriterionFindings, Finding, FindingsFilters, FindingsReport, FindingsSummaryRecord, SuggestedFix } from '../store/findings.js'
 import type {
   LabelStats, QueueItem, QueueStats, QueueReason, Reveal, QueueTurn, QueueToolCall,
 } from '../store/labels.js'
 import type { SuiteRecord, SuiteStatus, SuiteSummary } from '../store/suites.js'
 
 export type {
-  Anchor, CalibrationReport, CalibrationRecord, CriterionVerdict, EnvRef, GraderResult, Label, LabelStats, ModelNeeds, PreviewData, QueueItem, QueueReason,
-  QueueStats, QueueToolCall, QueueTurn, Reveal, Rubric, RunResult, RunStatus, Scenario, Split, SuiteRecord, SuiteStatus, SuiteSummary, Turn,
+  Anchor, CalibrationReport, CalibrationRecord, CriterionFindings, CriterionVerdict, EnvRef, Finding, FindingsFilters, FindingsReport, FindingsSummaryRecord,
+  GraderResult, Label, LabelStats, ModelNeeds, ModelPlan, PreviewData, QueueItem, QueueReason, QueueStats, QueueToolCall, QueueTurn, Reveal, Rubric, RunResult,
+  RunStatus, Scenario, Split, SuggestedFix, SuiteRecord, SuiteStatus, SuiteSummary, Turn,
 }
 
 // ------------------------------------------------------------------- errors
@@ -37,7 +39,7 @@ export type ErrorCode =
   | 'payload_too_large' //       413: body over the cap
   | 'not_found' //               404
   | 'method_not_allowed' //      405
-  | 'run_in_progress' //         409: a run or calibration is already running
+  | 'run_in_progress' //         409: a run or calibration is already running, or a findings summary is being written
   | 'no_active_run' //           409: cancel with nothing running
   | 'confirmation_required' //   428: a plan that can call a model needs previewToken and confirm: true
   | 'preview_token_invalid' //   412: the token does not match a fresh preview of this exact plan, or expired
@@ -45,13 +47,18 @@ export type ErrorCode =
   | 'config_invalid' //          422: the config does not validate
   | 'plan_invalid' //            422: scenarios or selection cannot run. details.errors lists them
   | 'provider_unavailable' //    503: the model provider could not be created (key missing, say)
-  | 'contamination' //           409: the judge's few-shot examples include dev or test labels
+  | 'contamination' //           409: the judge's few-shot examples include dev or test labels, or a new worked example would
   | 'duplicate_label' //         409
   | 'item_not_found' //          404: no such queue item
   | 'item_not_in_queue' //       422: the item exists but is not up for review (an unsampled pass)
-  | 'not_labelled' //            403: reveal before the item has a human label. 404 from revise: no label to change
+  | 'not_labelled' //            403: reveal before the item has a human label. 404 from revise or from-label: the item has no label
   | 'not_revealable' //          404: the label is not for a queue item, or its run is gone
   | 'no_change' //               422: a label revision or rubric edit that changes nothing
+  | 'not_train' //               422: only a train-split label can become a worked example
+  | 'not_in_rubric' //           422: the label's criterion is not a criterion of that rubric
+  | 'duplicate_example' //       409: the rubric already has a worked example with this input and output
+  | 'no_findings' //             422: a findings summary was asked for with no findings in the filter
+  | 'provider_error' //          502: the model call failed or returned something unusable
   | 'stale' //                   409: the rubric file changed on disk since the page read it (its hash is not baseHash). Reload
   | 'rubric_invalid' //          422: a rubric edit that cannot be applied: criteria added, removed or renamed, a bad example, a missing version
   | 'corrupt_record' //          422: a saved file could not be read
@@ -337,6 +344,37 @@ export interface RubricUpdateResponse {
   warnings: string[]
 }
 
+/**
+ * The body of POST /api/rubrics/:id/anchors/from-label: turns a train-split
+ * label into a worked example at the end of the rubric's `anchors`. The
+ * criterion and verdict come from the label. The optional fields replace the
+ * label's text in the example, so a long transcript can be trimmed or the
+ * critique tidied first. The label itself is unchanged.
+ */
+export interface AnchorFromLabelRequest {
+  /** The item id of a labelled item. */
+  itemId: string
+  /** `hash` from GET /api/rubrics. A file that changed on disk since then is refused with 409 `stale`. */
+  baseHash: string
+  /** Replaces the label's input. Blank leaves the example without one. */
+  input?: string
+  /** Replaces the label's output. Must not be blank. */
+  output?: string
+  /** Replaces the label's critique. Must not be blank. */
+  critique?: string
+}
+
+export interface AnchorFromLabelResponse {
+  /** The rubric as GET /api/rubrics now returns it. */
+  item: RubricItem
+  /** The new version. */
+  version: string
+  /** The new file's hash, for the next edit. */
+  hash: string
+  /** The example that was added. */
+  anchor: Anchor
+}
+
 // -------------------------------------------------------- running scenarios
 
 /** The body of POST /api/run/preview. POST /api/run/start takes it plus RunStartFields. */
@@ -464,7 +502,19 @@ export interface LabelsResponse {
   labels: Label[]
   /** For each item whose label was changed, keyed by item id: the superseded versions, oldest first (the blind label first). */
   history: Record<string, Label[]>
+  /** For each current label, keyed by item id: its split and whether it is already a worked example. */
+  meta: Record<string, LabelMeta>
   stats: LabelStats
+}
+
+/** What the page needs to offer "Use as worked example" on a label. Derived on every read, never stored. */
+export interface LabelMeta {
+  /** From the label's group (or its item id). Only train labels can become worked examples. */
+  split: Split
+  /** The rubric the label's criterion belongs to: the one its run's scenario uses, else the only loaded rubric with that criterion. Null when there is none. */
+  rubricId: string | null
+  /** True when that rubric already has a worked example made from this label (same input and output, or a trimmed copy of them). */
+  isExample: boolean
 }
 
 /**
@@ -510,4 +560,55 @@ export interface CalibrateStartResponse {
 export interface CalibrationResponse {
   /** The most recent saved calibration, or null when there is none. */
   latest: CalibrationRecord | null
+}
+
+// ------------------------------------------------------------------ findings
+
+/**
+ * GET /api/findings?since=&rubric=&criterion= (and GET /api/findings.md, the
+ * same report as Markdown). Built from the current fail labels joined to the
+ * saved runs. No model is called.
+ */
+export interface FindingsResponse extends FindingsReport {
+  /** The latest saved AI draft for these exact filters, or null. `current` is false when the findings changed since it was written. */
+  summary: { record: FindingsSummaryRecord; current: boolean } | null
+  /** Skipped run files, and the like. */
+  warnings: string[]
+}
+
+/** The body of POST /api/findings/summary/preview. The same filters as GET /api/findings. */
+export interface FindingsSummaryRequest {
+  /** A date (2026-11-01) or an ISO time. Only runs that started then or later. */
+  since?: string
+  rubric?: string
+  criterion?: string
+}
+export type FindingsSummaryStartRequest = FindingsSummaryRequest & RunStartFields
+
+export interface FindingsSummaryPreviewResponse {
+  /** The filters as the server read them (`since` as an ISO time). */
+  filters: FindingsFilters
+  /** Findings in the report, and how many of them the prompt holds (at most 25 per criterion, newest first). */
+  findings: number
+  findingsInPrompt: number
+  criteria: number
+  /** The judge model from the config, which writes the draft. */
+  model: ModelPlan
+  /** Rough: about four characters per token. */
+  estimatedInputTokens: number
+  /** The output cap. Thinking counts against it. */
+  maxOutputTokens: number
+  /** Estimated input plus output at its cap, at the config's prices, so usually more than the real cost. Null when the model has no price. */
+  estimatedCostUsd: number | null
+  /** False when there are no findings: there is nothing to summarise and start will refuse. */
+  anyModelCalls: boolean
+  warnings: string[]
+  /** HMAC of these findings, filters and model. Send it back with `confirm: true`. Valid until `expiresAt`. */
+  previewToken: string
+  expiresAt: string
+}
+
+export interface FindingsSummaryResponse {
+  /** The draft, as saved in .evals/findings/. */
+  record: FindingsSummaryRecord
 }

@@ -171,6 +171,64 @@ describe('server security', () => {
     })
   })
 
+  // The other calls that write: one adds a worked example to a rubric file, the others call a model and save a draft.
+  // As above, no request here gets as far as writing or calling a model.
+  describe('POST /api/rubrics/:id/anchors/from-label and the findings summary', () => {
+    const routes = ['/api/rubrics/scheduling/anchors/from-label', '/api/findings/summary/preview', '/api/findings/summary']
+    const post = (path: string, headers: Record<string, string>, body = '{"nope":1}') =>
+      raw(f.ui, path, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body })
+
+    it('needs the token, and not in the query string', async () => {
+      for (const path of routes) {
+        expect((await post(path, {})).status, path).toBe(401)
+        expect((await post(path, { authorization: 'Bearer nope' })).status, path).toBe(401)
+        expect((await post(`${path}?token=${f.ui.token}`, {})).status, path).toBe(401)
+      }
+      expect((await raw(f.ui, '/api/findings')).status).toBe(401)
+      expect((await raw(f.ui, '/api/findings.md')).status).toBe(401)
+    })
+
+    it('refuses another origin, a request the browser marks cross-site and a foreign Host', async () => {
+      for (const path of routes) {
+        for (const headers of [{ origin: 'https://evil.example' }, { origin: 'null' }, { 'sec-fetch-site': 'cross-site' }, { 'sec-fetch-site': 'same-site' }] as Record<string, string>[]) {
+          const r = await post(path, { ...auth(), ...headers })
+          expect(r.status, `${path} ${JSON.stringify(headers)}`).toBe(403)
+          expect(r.json().error.code).toBe('forbidden_origin')
+        }
+        expect((await post(path, { ...auth(), host: 'evil.example' })).status, path).toBe(403)
+      }
+      expect((await raw(f.ui, '/api/findings.md', { headers: { ...auth(), origin: 'https://evil.example' } })).status).toBe(403)
+    })
+
+    it('requires application/json, caps the body and rejects unknown fields', async () => {
+      for (const path of routes) {
+        expect((await post(path, { ...auth(), 'content-type': 'text/plain' })).status, path).toBe(415)
+        const unknown = await post(path, { ...auth(), origin: `http://127.0.0.1:${port()}` }, JSON.stringify({ apiKey: 'sk-live-should-not-be-accepted' }))
+        expect(unknown.status, path).toBe(400)
+        expect(unknown.text).toMatch(/apiKey/)
+        expect(unknown.text).not.toContain('sk-live-should-not-be-accepted')
+      }
+      const small = await fixture({ server: { maxBodyBytes: 500 } })
+      try {
+        for (const path of routes) {
+          const big = await raw(small.ui, path, {
+            method: 'POST',
+            headers: { authorization: `Bearer ${small.ui.token}`, 'content-type': 'application/json' },
+            body: JSON.stringify({ itemId: 'x', baseHash: '0'.repeat(64), output: 'x'.repeat(2000) }),
+          })
+          expect(big.status, path).toBe(413)
+        }
+      } finally {
+        await small.stop()
+      }
+    })
+
+    it('answers the wrong method with 405', async () => {
+      expect((await raw(f.ui, '/api/rubrics/scheduling/anchors/from-label', { headers: auth() })).status).toBe(405)
+      expect((await post('/api/findings', auth(), '{}')).status).toBe(405)
+    })
+  })
+
   describe('request handling', () => {
     it('requires application/json on a POST', async () => {
       const r = await raw(f.ui, '/api/run/preview', { method: 'POST', headers: { ...auth(), 'content-type': 'text/plain' }, body: '{}' })

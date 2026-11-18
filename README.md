@@ -126,6 +126,11 @@ labelled an item, so you do not anchor on it, and it keeps at least 30 percent o
 labels randomly sampled (see [the judge methodology](docs/design/0002-judge-methodology.md)).
 After the reveal you can change your label. The change is saved as a new line
 and your blind label is kept, and calibration reports agreement on both.
+A training label can become a worked example in its rubric with one button and
+a confirmation. The Findings page collects every reply a person labelled fail,
+with the critique, into a report for the developers fixing the assistant, as a
+page or a Markdown file, with an optional AI draft of suggested fixes that shows
+its cost and asks before it runs.
 
 It is local only. The server listens on `127.0.0.1`, never on a network address,
 and needs a random access token that is printed in the URL it shows at startup:
@@ -141,6 +146,7 @@ Data is stored under `.evals/` in the directory you start it from (listed in
 |---|---|
 | `.evals/runs/<suiteId>.json` | one record per suite, written by `evals run` and by runs started in the page |
 | `.evals/calibration/<id>.json` | saved calibration reports |
+| `.evals/findings/<id>.json` | saved AI drafts of suggested fixes from the Findings page |
 | `.evals/labels.jsonl` | human labels (change it with `--labels`) |
 
 The front end is React and Vite in `ui/`, built into `dist/ui` (`npm run build`

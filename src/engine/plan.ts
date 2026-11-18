@@ -161,7 +161,7 @@ export interface PreviewOptions {
 
 const effortText = (effort: Effort | undefined, fallback: Effort) => (effort ? `effort ${effort}` : `effort ${fallback}, the default`)
 
-function modelPlan(config: Config, role: 'simulator' | 'judge'): ModelPlan {
+export function modelPlan(config: Config, role: 'simulator' | 'judge'): ModelPlan {
   const m = config.models[role]
   return { provider: m.provider, model: m.model, effort: m.effort ?? DEFAULT_EFFORT[role], effortIsDefault: m.effort === undefined, priced: m.model in config.pricing }
 }

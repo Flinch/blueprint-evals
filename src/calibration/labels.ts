@@ -237,6 +237,21 @@ export function contentKey(x: { input?: string; output: string }): string {
   return `${normalise(x.input ?? '')}\u0000${normalise(x.output)}`
 }
 
+/**
+ * Whether a worked example was made from this label. The same content key is a
+ * match whatever the criterion, because the judge has then seen the response.
+ * An example whose input or output was trimmed before it was added still counts
+ * as the label's when it is about the same criterion, has the same verdict, and
+ * its output (and input, when it has one) is part of the label's.
+ */
+export function isExampleOf(anchor: Anchor, label: Pick<Label, 'criterion' | 'input' | 'output' | 'verdict'>): boolean {
+  if (contentKey(anchor) === contentKey(label)) return true
+  if (anchor.criterion !== label.criterion || anchor.verdict !== label.verdict) return false
+  const output = normalise(anchor.output)
+  if (output === '' || !normalise(label.output).includes(output)) return false
+  return anchor.input === undefined || normalise(label.input ?? '').includes(normalise(anchor.input))
+}
+
 export class SplitViolationError extends Error {
   constructor(message: string) {
     super(message)

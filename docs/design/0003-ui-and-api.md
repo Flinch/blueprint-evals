@@ -69,6 +69,7 @@ Everything lives under `<workdir>/.evals/`, where the workdir is the directory
 .evals/
   runs/<suiteId>.json            one record per suite: every `evals run` and every UI run
   calibration/<calibrationId>.json   one record per calibration
+  findings/<summaryId>.json      one AI draft of suggested fixes per "Suggest fixes" on the Findings page
   labels.jsonl                   human labels (the default; `evals ui --labels file` picks another)
 ```
 
@@ -99,6 +100,12 @@ Everything lives under `<workdir>/.evals/`, where the workdir is the directory
 rubricId, rubricVersion, labelsFile, split, selection, command, report }`, where
 `report` is the `CalibrationReport` from `src/calibration/evaluate.ts`.
 
+**Findings summary record** (`FindingsSummaryRecord`): `{ schemaVersion: 1,
+summaryId, at, filters, fingerprint, findings, itemIds, model, usage, fixes,
+warnings }`. `fingerprint` is a hash of the findings the draft was written from,
+so the page can tell when the findings have changed since. The id is a
+timestamp like a suite id.
+
 **Labels** are the format in 0002, one JSON object per line, append-only. A
 changed label is a new line with `replaces` set to the id of the line it
 supersedes and an id of `<itemId>~r<n>`. Nothing already in the file is
@@ -126,7 +133,7 @@ sensitive, so the server defends itself even though it is local.
 | Spending without looking | The confirmation protocol below |
 | Oversized or malformed requests | Bodies over 1 MiB are refused with 413 and the connection is dropped. Malformed JSON is a 400 |
 | Path traversal | Static files: the URL path is decoded once, any `..`, `.`, dotfile segment, NUL or backslash is refused, and the real path (symlinks followed) must stay inside `dist/ui`. API ids: a strict alphabet, and a `path` in a request body must resolve inside the workdir, the config's directory or the configured scenarios path |
-| Writing files it should not | The only file the API writes outside `.evals/` is a rubric being edited, and only the file the server loaded that rubric from. The body has no path, and the file's real path must be inside the workdir, the config's directory or the scenarios path |
+| Writing files it should not | The only file the API writes outside `.evals/` is a rubric being edited or given a worked example, and only the file the server loaded that rubric from. The body has no path, and the file's real path must be inside the workdir, the config's directory or the scenarios path |
 | Clickjacking, sniffing, caching | `X-Frame-Options: DENY`, a `Content-Security-Policy` that allows only this origin, `X-Content-Type-Options: nosniff`, `Cache-Control: no-store`, `Referrer-Policy: no-referrer` |
 
 ### The token
@@ -148,8 +155,9 @@ sensitive, so the server defends itself even though it is local.
 
 ### The cost confirmation protocol
 
-Anything that could call a model (a run with a persona, a rubric or a goal, or a
-calibration with labels to judge) must pass through two calls:
+Anything that could call a model (a run with a persona, a rubric or a goal, a
+calibration with labels to judge, or a findings summary) must pass through two
+calls:
 
 1. **Preview.** `POST /api/run/preview` (or `/api/calibrate/preview`) returns the
    same cost preview the CLI prints, as data, and a `previewToken`. The token is
@@ -158,7 +166,10 @@ calibration with labels to judge) must pass through two calls:
    hash of each scenario and rubric, in run order), the cost cap, both models
    with their efforts and prices, the timeouts, and a hash of each target's
    config. For a calibration: the rubric, the split, the selection, a hash of
-   the label set, and the judge model. It also covers an expiry, 15 minutes out.
+   the label set, and the judge model. For a findings summary
+   (`/api/findings/summary/preview`): a hash of the findings (which includes the
+   filters), the judge model with its price and timeout, and the output cap. It
+   also covers an expiry, 15 minutes out.
 2. **Start.** `POST /api/run/start` (or `/api/calibrate/start`) takes the same
    body plus `previewToken` and `confirm: true`. The server rebuilds the plan from
    the files as they are **now**, recomputes the HMAC and compares. A plan that
@@ -184,7 +195,9 @@ not used. A refused call makes no provider, writes no file and spends nothing.
   one display path, relative to the workdir.
 - Responses are never cached.
 - The server runs **one job at a time** (a run or a calibration). A second start
-  while one is going is a 409 `run_in_progress`.
+  while one is going is a 409 `run_in_progress`. A findings summary is one short
+  model call with its own lock: a second one while it is being written is also a
+  409 `run_in_progress`. It does not wait for a run.
 
 ### Errors
 
@@ -206,14 +219,15 @@ what a front end should switch on. `details` is present for `plan_invalid`
 | 403 | `forbidden_origin` | A cross-origin request |
 | 403 | `not_labelled` | Reveal before the item has a label |
 | 404 | `not_found` | No such endpoint, suite, run or rubric |
-| 404 | `not_labelled` | Revise an item that has no label yet |
+| 404 | `not_labelled` | Revise an item, or make a worked example from an item, that has no label yet |
 | 404 | `item_not_found` | No unlabelled queue item with that id |
 | 404 | `not_revealable` | The label is not for a queue item, or its run is gone |
 | 405 | `method_not_allowed` | Wrong method for the endpoint |
-| 409 | `run_in_progress` | A run or calibration is already going |
+| 409 | `run_in_progress` | A run or calibration is already going, or a findings summary is being written |
 | 409 | `no_active_run` | Cancel with nothing running |
 | 409 | `config_missing` | No config file was found or given |
-| 409 | `contamination` | The judge's few-shot examples include dev or test labels |
+| 409 | `contamination` | The judge's few-shot examples include dev or test labels, or a new worked example has the same input and output as a dev or test label |
+| 409 | `duplicate_example` | The rubric already has a worked example with this input and output (or one made from this label) |
 | 409 | `duplicate_label` | The item already has a label |
 | 409 | `stale` | A rubric edit whose `baseHash` is not the file's current hash: the file changed on disk since the page read it |
 | 412 | `preview_token_invalid` | See the confirmation protocol |
@@ -222,12 +236,16 @@ what a front end should switch on. `details` is present for `plan_invalid`
 | 422 | `config_invalid` | The config does not validate |
 | 422 | `plan_invalid` | Scenarios or selection cannot run. `details.errors` lists them |
 | 422 | `item_not_in_queue` | The item exists but is not up for review |
+| 422 | `not_train` | A worked example from a dev or test label. Only train labels can become worked examples |
+| 422 | `not_in_rubric` | A worked example whose label is about a criterion the rubric does not have |
+| 422 | `no_findings` | A findings summary for filters with no findings |
 | 422 | `no_change` | A revision with the same verdict and critique as the current label, or a rubric edit identical to the file |
 | 422 | `rubric_invalid` | A rubric edit that cannot be applied: criteria added, removed, renamed or reordered, blank wording, a bad weight or example, a missing version, a file defined twice or outside the allowed directories |
 | 422 | `corrupt_record` | A saved file could not be read |
 | 428 | `confirmation_required` | See the confirmation protocol |
 | 500 | `store_unwritable` | `.evals/`, or a rubric file being edited, could not be written |
 | 500 | `internal` | A bug. The message says what |
+| 502 | `provider_error` | The model call for a findings summary failed, was refused, ran out of tokens or returned the wrong structure. Nothing was saved |
 | 503 | `provider_unavailable` | The model provider could not be created (a missing key, say) |
 
 ## Endpoints
@@ -339,6 +357,37 @@ interface RubricUpdateRequest {
   calibration uses) are about it. A label file that cannot be read does not stop
   the save. The response then says so in `warnings`.
 
+**`POST /api/rubrics/:id/anchors/from-label`** takes `AnchorFromLabelRequest` and
+returns `AnchorFromLabelResponse`. It turns one train-split label into a worked
+example at the end of the rubric's `anchors` (see
+[Worked examples from labels](#worked-examples-from-labels)).
+
+```ts
+interface AnchorFromLabelRequest { itemId: string; baseHash: string; input?: string; output?: string; critique?: string }
+```
+
+- The example gets the label's criterion and verdict, and its input, output and
+  critique unless the body replaces them (to trim a long transcript or tidy the
+  critique). A blank `input` leaves the example without one. `output` and
+  `critique`, when sent, must not be blank. The label is not changed.
+- 404 `not_labelled` when the item has no current label.
+- 422 `not_train` when the label's split is dev or test: those labels must stay
+  unseen by the judge, or calibration would grade it on examples it was shown.
+- 404 `not_found` for an unknown rubric, 409 `stale` when the file's hash is not
+  `baseHash`, and 422 `not_in_rubric` when the label's criterion is not one of
+  the rubric's.
+- 409 `duplicate_example` when the rubric already has an example with the same
+  content key (input and output, normalised) or one made from this label,
+  trimmed. 409 `contamination` when the new example's input and output match a
+  dev or test label.
+- The write goes through the same code as `PUT /api/rubrics/:id`: the example is
+  appended to `anchors` as a span-preserving edit (comments and everything else
+  kept byte for byte), the version goes up (a version that is not a whole number
+  is a 422 `rubric_invalid`), the result is read back with the loader's schema,
+  and the write is atomic.
+- The response has the rubric as `GET /api/rubrics` now returns it, its new
+  `hash` and `version`, and the `anchor` that was added.
+
 ### Running scenarios
 
 **`POST /api/run/preview`** takes `RunRequest` and returns `RunPreviewResponse`.
@@ -408,7 +457,10 @@ already broken, so nothing is appended).
 **`GET /api/labels`** returns `LabelsResponse`: the file, the current label of
 each item (a changed label appears once, as its latest version), `history` (for
 each changed item, keyed by item id, the versions it superseded, oldest first),
-and `LabelStats` (counts of items, random share, verdict counts, split counts,
+`meta` (for each current label, keyed by item id: its `split`, the `rubricId`
+its criterion belongs to, and `isExample`, whether that rubric already has a
+worked example made from it; derived on every read, so the label format is
+unchanged), and `LabelStats` (counts of items, random share, verdict counts, split counts,
 labelers, `revisions` (how many items were changed), and the same sanity
 warnings `evals validate` gives).
 
@@ -481,6 +533,73 @@ error.
 
 **`GET /api/calibration`** returns `CalibrationResponse`: `{ latest }`, the most
 recent saved calibration or `null`.
+
+### Findings
+
+**`GET /api/findings?since=&rubric=&criterion=`** returns `FindingsResponse`, the
+findings report (see [Findings](#the-findings-report)). All three filters are optional.
+`since` is a date (`2026-11-01`, read as midnight UTC) or an ISO time, compared
+with each run's start time; anything else is a 400. It is a pure read and calls
+no model.
+
+- `criteria`: one entry per criterion with at least one finding, critical first,
+  then by the number of failures. Each has the criterion's text and critical
+  flag from the rubric as it is now, the rubric id and version, `failed` (current
+  fail labels in the filter), `labelled` (every current label for it in the
+  filter) and `findings`, newest run first.
+- A finding: `itemId`, `suiteId`, `runId`, the run's `startedAt`, `scenarioId`,
+  `userMessage` (the last user message before the judged reply, or an excerpt of
+  the label's input), `output` (the judged reply), `critique`, `labeler`,
+  `labelledAt`, and `revised` (the label was changed after it was first saved,
+  so possibly after seeing the judge).
+- `unreviewedJudgeFailures`: criteria the judge failed in the saved runs in the
+  filter that nobody has labelled. They are counted and left out, so the report
+  covers verified findings only. `notFromSavedRun` counts current labels whose
+  item is not in the saved runs (a hand-written label, a deleted run).
+- `summary`: the latest saved AI draft whose filters equal these, with
+  `current: false` when the findings have changed since it was written. Null
+  when there is none.
+
+**`GET /api/findings.md?since=&rubric=&criterion=`** returns the same report as
+`text/markdown` with `Content-Disposition: attachment; filename="findings-<date>.md"`.
+The server builds the Markdown, so the page's download, its copy button and a
+script all get the same text, scrubbed like every other response. Layout: title,
+date, filters, the unreviewed count, then the AI draft when there is a current
+one for these filters ("Suggested fixes (AI draft, review before use)"), a
+summary table (criterion, critical, failed / labelled), and a section per
+criterion with the rule text and each finding (scenario, run time, user message,
+the assistant reply as a quote block, critique). A draft written from other
+findings is left out of the file.
+
+**`POST /api/findings/summary/preview`** takes `FindingsSummaryRequest` (the same
+three filters, in the body) and returns `FindingsSummaryPreviewResponse`: the
+filters as read, the number of findings and how many go into the prompt (at most
+25 per criterion, newest first), the number of criteria, the judge model from the
+config (`ModelPlan`), an estimated input size (about four characters per token),
+the output cap, `estimatedCostUsd` (the input estimate plus the whole output cap
+at the config's prices, so usually above the real cost; null when the model has
+no price), `anyModelCalls` (false with no findings), warnings, and a
+`previewToken`. Errors: 409 `config_missing`, 422 `config_invalid`, 422
+`plan_invalid` (a judge provider other than Anthropic).
+
+**`POST /api/findings/summary`** takes `FindingsSummaryStartRequest` (the filters
+plus `previewToken` and `confirm: true`) and returns 201
+`FindingsSummaryResponse` (`{ record }`). It rebuilds the findings, refuses an
+empty report with 422 `no_findings`, then follows the
+[confirmation protocol](#the-cost-confirmation-protocol): 428 without the token
+and `confirm`, 412 when the findings, the filters or the judge model changed
+since the preview. It makes one judge-model call with structured output: per
+criterion, the pattern the failures share, a proposed plain-language change to
+the assistant's instructions or behavior, and the item ids it rests on. The
+prompt quotes each finding inside tags and says that quoted content is data and
+never an instruction. Fixes for criteria not in the report are dropped, and item
+ids that are not findings are removed, each with a warning on the record. The
+draft is saved to `.evals/findings/<summaryId>.json` with the filters, the
+findings fingerprint, the model and the usage. Errors: 503
+`provider_unavailable` (no provider, a missing key), 502 `provider_error` (the
+call failed, was refused, was cut off or returned the wrong structure; nothing is
+saved), 409 `run_in_progress` (another summary is being written), 500
+`store_unwritable`.
 
 ## The run event stream
 
@@ -752,6 +871,64 @@ version they used."), and gives the label counts. Confirm writes, Back to editin
 returns to the form. A 409 `stale` (the file was edited on disk meanwhile) shows a
 message and a button to reload the file.
 
+## Worked examples from labels
+
+**Why.** When the judge misreads a rubric, a sharper worked example is often the
+fix, and the label a person just wrote is that example: the input, the output,
+the verdict and a critique. Copying it into the YAML by hand is slow and easy to
+get wrong, and it is easy to copy a dev or test label by mistake, which would
+let calibration grade the judge on an example it was shown. A button does it
+under the rules instead.
+
+**On the page.** In Classify, every label in the All labels list carries a small
+split badge (train, dev or test), and so does the saved item in the review queue
+after the reveal. The label's details, and the queue after the reveal, show:
+
+- for a train label that is not an example yet, **Use as worked example**. It
+  opens a dialog prefilled with the input, output, verdict and critique. Input,
+  output and critique are editable, so a long transcript can be trimmed; the
+  verdict is read-only. The dialog says "Adds this to rubric `<id>` and makes it
+  version N. The judge sees every worked example on every grading call, so each
+  call costs slightly more." Confirm calls
+  `POST /api/rubrics/:id/anchors/from-label` with the rubric's current hash. On
+  success the page says "Added as a worked example" and links to the criterion
+  on the Rubrics tab.
+- for a dev or test label, the button disabled, with the reason beside it: "Only
+  training labels can become worked examples, so dev and test stay an honest
+  check of the judge."
+- for a label that already is an example, an **Example** badge instead.
+
+All of this is on labelled items only, so nothing about the judge shows before a
+label is saved. Adding an example changes the judge, so the next step is a new
+calibration on dev (see "Worked examples from labels" in 0002).
+
+## The findings report
+
+**Why.** The labels are also the clearest bug reports there are: each fail label
+is a reply a person judged wrong, with a written reason. The Findings page turns
+them into a document a developer can act on. It lists only failures a person
+confirmed, and says how many judge failures are still waiting for review, so a
+reader knows where the line is. Disagreements with the judge belong to the other
+loop, fixing the judge (see "Two loops" in 0002).
+
+**On the page** (`#/findings`, in the navigation): filters for runs since a date,
+rubric and criterion, kept in the address; the summary table (criterion,
+critical, failed / labelled); a collapsible section per criterion with the rule
+text and each finding (scenario, run time, user message, assistant reply,
+critique, labeler, a Revised badge when the label was changed) and an "Open the
+run" link; and the buttons **Download Markdown** and **Copy as Markdown**, both
+of which fetch `GET /api/findings.md` with the same filters.
+
+**Suggest fixes** asks the judge model for a draft of fixes. It never fires on
+one click: the page asks the server for a preview, shows a dialog with the
+scope, the number of findings, the model and the estimated cost (focus on
+Cancel), and only Confirm makes the call. A 412 means the findings changed: the
+page previews again and shows the new numbers in the dialog. The latest draft
+for the current filters is shown above the table as "Suggested fixes (AI draft,
+review before use)", with its date, model and cost and a note that it is a draft
+to check against the findings, and a warning when the findings have changed
+since it was written.
+
 ## What the front end needs to do
 
 These follow from the above. They are the parts that are easy to get wrong.
@@ -799,6 +976,7 @@ runtime dependencies are unchanged.
 | `#/runs`, `#/runs/<runId>` | Suites, filtered run list, and run detail with transcript, tool calls, checks (skipped shown apart from pass), criteria with critiques (N/A criteria listed apart, muted and marked "Not graded"), goal, score (n/a when no criterion applied), cost, trace |
 | `#/launch` | Choose scenarios and a cap, preview, confirm, then live progress from the event stream and cancel |
 | `#/classify`, `#/classify?item=<itemId>`, `#/classify?criterion=<id>`, `#/classify/labels` | Blind review queue (with a picker, a deep link to one item, and one-criterion mode), and the label list |
+| `#/findings`, `#/findings?since=<date>&rubric=<id>&criterion=<id>` | The findings report: what people failed and why, by criterion, with Markdown download and copy, and an AI draft of suggested fixes behind a confirmation |
 | `#/calibration` | Choose rubric, split and selection, preview, confirm, then the report with the true negative rate first |
 | `#/scenarios`, `#/scenarios?tab=rubrics&rubric=<id>&criterion=<id>` | Scenarios (read-only), rubrics with an Edit button, and validation problems. The deep link opens the Rubrics tab and highlights that criterion and its worked examples |
 
@@ -841,9 +1019,14 @@ Choices worth knowing:
   to the criterion, before and after the reveal) and the disagreements in a
   calibration report link to the criterion with "View or edit this criterion".
   From Classify the link opens a new tab, so an unsaved label stays put.
-- **Confirmation.** The page never calls `POST /api/run/start` or
-  `POST /api/calibrate/start` without a preview of the same request and a click in a
-  dialog that states the scope and the number of model calls. A changed selection or
+- **Worked examples from labels.** See
+  [Worked examples from labels](#worked-examples-from-labels).
+- **Findings.** See [Findings](#the-findings-report).
+- **Confirmation.** The page never calls `POST /api/run/start`,
+  `POST /api/calibrate/start` or `POST /api/findings/summary` without a preview of
+  the same request and a click in a dialog that states the scope and the number
+  of model calls (for a findings summary: the number of findings, the model and
+  the estimated cost). A changed selection or
   cap drops the preview. A 412 triggers a new preview and a list of what changed.
 - **Demo mode.** `npm run ui:demo` starts the server with `demo: true`, which
   `GET /api/health` reports and the page turns into a "Demo data" banner. The demo
@@ -881,7 +1064,12 @@ suite, one run at a time, cancel, the blind queue, the quota and its stability,
 label validation, calibration through the API, corrupt files, rubric edits (on
 temporary copies of the example rubrics: comments kept, version bumps, stale,
 refused edits, label counts, and the change showing in the rubric list and the
-queue), and that no response contains a secret value from the environment.
+queue), worked examples from labels (comments kept, version bump, train only,
+duplicates, stale, overrides), the findings report and its Markdown (grouping,
+ordering, counts, filters, revised labels, unreviewed judge failures), the
+findings summary's preview and confirmation (a changed report is a 412, a
+missing provider, a failed call, a saved draft), and that no response contains a
+secret value from the environment.
 
 ## Open questions
 
@@ -926,19 +1114,21 @@ This is `src/ui/api-types.ts`, verbatim.
 
 import type { CalibrationReport } from '../calibration/evaluate.js'
 import type { Label, Split } from '../calibration/labels.js'
-import type { EnvRef, ModelNeeds, PreviewData } from '../engine/plan.js'
+import type { EnvRef, ModelNeeds, ModelPlan, PreviewData } from '../engine/plan.js'
 import type { CriterionVerdict, GraderResult, RunResult, RunStatus } from '../core/interfaces.js'
 import type { Anchor, Rubric, Scenario } from '../core/scenario.js'
 import type { Turn } from '../core/trace.js'
 import type { CalibrationRecord } from '../store/calibration.js'
+import type { CriterionFindings, Finding, FindingsFilters, FindingsReport, FindingsSummaryRecord, SuggestedFix } from '../store/findings.js'
 import type {
   LabelStats, QueueItem, QueueStats, QueueReason, Reveal, QueueTurn, QueueToolCall,
 } from '../store/labels.js'
 import type { SuiteRecord, SuiteStatus, SuiteSummary } from '../store/suites.js'
 
 export type {
-  Anchor, CalibrationReport, CalibrationRecord, CriterionVerdict, EnvRef, GraderResult, Label, LabelStats, ModelNeeds, PreviewData, QueueItem, QueueReason,
-  QueueStats, QueueToolCall, QueueTurn, Reveal, Rubric, RunResult, RunStatus, Scenario, Split, SuiteRecord, SuiteStatus, SuiteSummary, Turn,
+  Anchor, CalibrationReport, CalibrationRecord, CriterionFindings, CriterionVerdict, EnvRef, Finding, FindingsFilters, FindingsReport, FindingsSummaryRecord,
+  GraderResult, Label, LabelStats, ModelNeeds, ModelPlan, PreviewData, QueueItem, QueueReason, QueueStats, QueueToolCall, QueueTurn, Reveal, Rubric, RunResult,
+  RunStatus, Scenario, Split, SuggestedFix, SuiteRecord, SuiteStatus, SuiteSummary, Turn,
 }
 
 // ------------------------------------------------------------------- errors
@@ -952,7 +1142,7 @@ export type ErrorCode =
   | 'payload_too_large' //       413: body over the cap
   | 'not_found' //               404
   | 'method_not_allowed' //      405
-  | 'run_in_progress' //         409: a run or calibration is already running
+  | 'run_in_progress' //         409: a run or calibration is already running, or a findings summary is being written
   | 'no_active_run' //           409: cancel with nothing running
   | 'confirmation_required' //   428: a plan that can call a model needs previewToken and confirm: true
   | 'preview_token_invalid' //   412: the token does not match a fresh preview of this exact plan, or expired
@@ -960,13 +1150,18 @@ export type ErrorCode =
   | 'config_invalid' //          422: the config does not validate
   | 'plan_invalid' //            422: scenarios or selection cannot run. details.errors lists them
   | 'provider_unavailable' //    503: the model provider could not be created (key missing, say)
-  | 'contamination' //           409: the judge's few-shot examples include dev or test labels
+  | 'contamination' //           409: the judge's few-shot examples include dev or test labels, or a new worked example would
   | 'duplicate_label' //         409
   | 'item_not_found' //          404: no such queue item
   | 'item_not_in_queue' //       422: the item exists but is not up for review (an unsampled pass)
-  | 'not_labelled' //            403: reveal before the item has a human label. 404 from revise: no label to change
+  | 'not_labelled' //            403: reveal before the item has a human label. 404 from revise or from-label: the item has no label
   | 'not_revealable' //          404: the label is not for a queue item, or its run is gone
   | 'no_change' //               422: a label revision or rubric edit that changes nothing
+  | 'not_train' //               422: only a train-split label can become a worked example
+  | 'not_in_rubric' //           422: the label's criterion is not a criterion of that rubric
+  | 'duplicate_example' //       409: the rubric already has a worked example with this input and output
+  | 'no_findings' //             422: a findings summary was asked for with no findings in the filter
+  | 'provider_error' //          502: the model call failed or returned something unusable
   | 'stale' //                   409: the rubric file changed on disk since the page read it (its hash is not baseHash). Reload
   | 'rubric_invalid' //          422: a rubric edit that cannot be applied: criteria added, removed or renamed, a bad example, a missing version
   | 'corrupt_record' //          422: a saved file could not be read
@@ -1252,6 +1447,37 @@ export interface RubricUpdateResponse {
   warnings: string[]
 }
 
+/**
+ * The body of POST /api/rubrics/:id/anchors/from-label: turns a train-split
+ * label into a worked example at the end of the rubric's `anchors`. The
+ * criterion and verdict come from the label. The optional fields replace the
+ * label's text in the example, so a long transcript can be trimmed or the
+ * critique tidied first. The label itself is unchanged.
+ */
+export interface AnchorFromLabelRequest {
+  /** The item id of a labelled item. */
+  itemId: string
+  /** `hash` from GET /api/rubrics. A file that changed on disk since then is refused with 409 `stale`. */
+  baseHash: string
+  /** Replaces the label's input. Blank leaves the example without one. */
+  input?: string
+  /** Replaces the label's output. Must not be blank. */
+  output?: string
+  /** Replaces the label's critique. Must not be blank. */
+  critique?: string
+}
+
+export interface AnchorFromLabelResponse {
+  /** The rubric as GET /api/rubrics now returns it. */
+  item: RubricItem
+  /** The new version. */
+  version: string
+  /** The new file's hash, for the next edit. */
+  hash: string
+  /** The example that was added. */
+  anchor: Anchor
+}
+
 // -------------------------------------------------------- running scenarios
 
 /** The body of POST /api/run/preview. POST /api/run/start takes it plus RunStartFields. */
@@ -1379,7 +1605,19 @@ export interface LabelsResponse {
   labels: Label[]
   /** For each item whose label was changed, keyed by item id: the superseded versions, oldest first (the blind label first). */
   history: Record<string, Label[]>
+  /** For each current label, keyed by item id: its split and whether it is already a worked example. */
+  meta: Record<string, LabelMeta>
   stats: LabelStats
+}
+
+/** What the page needs to offer "Use as worked example" on a label. Derived on every read, never stored. */
+export interface LabelMeta {
+  /** From the label's group (or its item id). Only train labels can become worked examples. */
+  split: Split
+  /** The rubric the label's criterion belongs to: the one its run's scenario uses, else the only loaded rubric with that criterion. Null when there is none. */
+  rubricId: string | null
+  /** True when that rubric already has a worked example made from this label (same input and output, or a trimmed copy of them). */
+  isExample: boolean
 }
 
 /**
@@ -1425,6 +1663,57 @@ export interface CalibrateStartResponse {
 export interface CalibrationResponse {
   /** The most recent saved calibration, or null when there is none. */
   latest: CalibrationRecord | null
+}
+
+// ------------------------------------------------------------------ findings
+
+/**
+ * GET /api/findings?since=&rubric=&criterion= (and GET /api/findings.md, the
+ * same report as Markdown). Built from the current fail labels joined to the
+ * saved runs. No model is called.
+ */
+export interface FindingsResponse extends FindingsReport {
+  /** The latest saved AI draft for these exact filters, or null. `current` is false when the findings changed since it was written. */
+  summary: { record: FindingsSummaryRecord; current: boolean } | null
+  /** Skipped run files, and the like. */
+  warnings: string[]
+}
+
+/** The body of POST /api/findings/summary/preview. The same filters as GET /api/findings. */
+export interface FindingsSummaryRequest {
+  /** A date (2026-11-01) or an ISO time. Only runs that started then or later. */
+  since?: string
+  rubric?: string
+  criterion?: string
+}
+export type FindingsSummaryStartRequest = FindingsSummaryRequest & RunStartFields
+
+export interface FindingsSummaryPreviewResponse {
+  /** The filters as the server read them (`since` as an ISO time). */
+  filters: FindingsFilters
+  /** Findings in the report, and how many of them the prompt holds (at most 25 per criterion, newest first). */
+  findings: number
+  findingsInPrompt: number
+  criteria: number
+  /** The judge model from the config, which writes the draft. */
+  model: ModelPlan
+  /** Rough: about four characters per token. */
+  estimatedInputTokens: number
+  /** The output cap. Thinking counts against it. */
+  maxOutputTokens: number
+  /** Estimated input plus output at its cap, at the config's prices, so usually more than the real cost. Null when the model has no price. */
+  estimatedCostUsd: number | null
+  /** False when there are no findings: there is nothing to summarise and start will refuse. */
+  anyModelCalls: boolean
+  warnings: string[]
+  /** HMAC of these findings, filters and model. Send it back with `confirm: true`. Valid until `expiresAt`. */
+  previewToken: string
+  expiresAt: string
+}
+
+export interface FindingsSummaryResponse {
+  /** The draft, as saved in .evals/findings/. */
+  record: FindingsSummaryRecord
 }
 ```
 <!-- api-types:end -->

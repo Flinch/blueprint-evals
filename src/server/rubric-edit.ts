@@ -48,15 +48,33 @@ const invalid = (message: string) => new ApiError(422, 'rubric_invalid', message
 const ANCHOR_FIELDS = ['criterion', 'input', 'output', 'verdict', 'critique'] as const
 type Splice = { start: number; end: number; text: string }
 
-/** The edited rubric, the version it gets and the new file text. Throws ApiError for anything that cannot be applied. */
-export function applyRubricEdit(source: string, edit: RubricEdit): AppliedEdit {
+function readSource(source: string): { top: YAMLMap; rubric: Rubric } {
   const doc = parseDocument(source)
   if (doc.errors.length > 0) throw invalid(`The file is not valid YAML: ${doc.errors[0]!.message}`)
   const top = doc.contents
   if (!isMap(top)) throw invalid('The file is not a YAML mapping.')
   const parsed = RubricSchema.safeParse(doc.toJS())
   if (!parsed.success) throw invalid(`The file does not validate as a rubric:\n${z.prettifyError(parsed.error)}`)
-  const current = parsed.data
+  return { top, rubric: parsed.data }
+}
+
+/** The rubric in a file's text, read with the loader's schema. Throws ApiError `rubric_invalid` when it does not validate. */
+export function parseRubricSource(source: string): Rubric {
+  return readSource(source).rubric
+}
+
+/** An edit that keeps the criteria and the reference facts as they are and adds one worked example at the end. */
+export function appendAnchorEdit(rubric: Rubric, anchor: Anchor): RubricEdit {
+  return {
+    criteria: rubric.criteria.map(c => ({ id: c.id, text: c.text, weight: c.weight, critical: c.critical })),
+    context: rubric.context ?? null,
+    anchors: [...rubric.anchors, anchor],
+  }
+}
+
+/** The edited rubric, the version it gets and the new file text. Throws ApiError for anything that cannot be applied. */
+export function applyRubricEdit(source: string, edit: RubricEdit): AppliedEdit {
+  const { top, rubric: current } = readSource(source)
 
   // ---- what was asked for
 

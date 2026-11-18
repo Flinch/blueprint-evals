@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync } from 'node:fs'
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createScrubber, secretValues } from '../../src/server/redact.js'
@@ -39,9 +39,14 @@ describe('secret values never leave the server', () => {
     expect(onDisk).toContain(SECRET)
 
     const runId = events.find(e => e.event === 'run:start')!.data.runId
+    // A fail label on the echoed reply, so the findings report and its Markdown quote it.
+    const echoed = JSON.parse(onDisk).results[0].trace.turns.find((t: { role: string }) => t.role === 'assistant').content as string
+    mkdirSync(join(f.workdir, '.evals'), { recursive: true })
+    const failLabel = { id: `${runId}:leaks`, group: runId, criterion: 'leaks', output: echoed, verdict: 'fail', critique: 'It echoed a key.', labeler: 'ann', sampled_by: 'targeted', at: '2026-11-12T10:00:00.000Z' }
+    writeFileSync(join(f.workdir, '.evals', 'labels.jsonl'), JSON.stringify(failLabel) + '\n')
     const gets = [
       '/api/health', '/api/overview', '/api/suites', `/api/suites/${started.suiteId}`, '/api/runs', `/api/runs/${runId}`, '/api/scenarios', '/api/rubrics',
-      '/api/queue?limit=200', '/api/labels', '/api/calibration', '/api/run/status',
+      '/api/queue?limit=200', '/api/labels', '/api/calibration', '/api/run/status', '/api/findings', '/api/findings.md',
     ]
     for (const path of gets) {
       const r = await f.api.get(path)
@@ -51,6 +56,7 @@ describe('secret values never leave the server', () => {
       expect(r.text, path).not.toContain('vendor-fake')
     }
     expect((await f.api.get(`/api/runs/${runId}`)).text).toContain('debug: key=[redacted]')
+    expect((await f.api.get('/api/findings.md')).text).toContain('> debug: key=[redacted]')
 
     // POST responses and error responses too.
     const posts: [string, unknown][] = [
