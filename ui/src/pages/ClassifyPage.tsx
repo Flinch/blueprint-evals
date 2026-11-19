@@ -29,6 +29,7 @@ import { readStored, writeStored } from '../lib/storage'
 
 export const LABELER_KEY = 'evals-ui-labeler'
 export const MODE_KEY = 'evals-ui-classify-mode'
+export const REVEAL_AFTER_KEY = 'evals-ui-reveal-after-save'
 export const MAX_CRITIQUE = 20_000
 export const MAX_LABELER = 100
 // The server's largest page. The picker lists the whole queue, so ask for all it will give.
@@ -634,6 +635,10 @@ export function QueueView({
   const [skipped, setSkipped] = useState(0)
   const [linkMissing, setLinkMissing] = useState(false)
   const [reviseChips, setReviseChips] = useState(0)
+  // Off by default: Save moves straight to the next item. On: Save stays on the item and shows the judge's answer.
+  const [revealAfter, setRevealAfter] = useState(() => readStored(REVEAL_AFTER_KEY) === 'on')
+  // A short note about the label just saved, shown on the next item when Save moved on.
+  const [flash, setFlash] = useState<string | null>(null)
   // The saved label's split and example status, fetched after the reveal, so nothing about it shows before labelling.
   const [itemMeta, setItemMeta] = useState<LabelMeta | null>(null)
   const critiqueRef = useRef<HTMLTextAreaElement>(null)
@@ -787,10 +792,24 @@ export function QueueView({
     try {
       const res = await api.postLabel({ itemId: current.itemId, labeler: labeler.trim(), verdict, critique: critique.trim() })
       writeStored(LABELER_KEY, labeler.trim())
-      setSaved(res.label)
-      setPhase('saved')
       setSessionDone(n => n + 1)
       refreshStats()
+      if (!revealAfter) {
+        setFlash(`Saved: ${res.label.verdict} for ${current.criterion.id} (scenario ${current.scenarioId}).`)
+        next()
+        return
+      }
+      setFlash(null)
+      setSaved(res.label)
+      setPhase('revealing')
+      try {
+        setReveal(await api.reveal(current.itemId))
+        setPhase('revealed')
+        loadItemMeta(current.itemId)
+      } catch (e) {
+        setPhase('saved')
+        setProblem(`Your label is saved, but the judge's answer could not be loaded: ${describeError(e)}`)
+      }
     } catch (e) {
       setPhase('edit')
       if (isApiFailure(e) && (e.code === 'duplicate_label' || e.code === 'item_not_found' || e.code === 'item_not_in_queue')) {
@@ -799,7 +818,7 @@ export function QueueView({
         setProblem(describeError(e))
       }
     }
-  }, [current, phase, valid, verdict, errors.critique, labeler, critique])
+  }, [current, phase, valid, verdict, errors.critique, labeler, critique, revealAfter, next])
 
   const loadItemMeta = (itemId: string) => {
     api.labels().then(l => setItemMeta(l.meta?.[itemId] ?? null)).catch(() => setItemMeta(null))
@@ -979,6 +998,7 @@ export function QueueView({
           </div>
 
           <ItemPicker items={items} currentId={current.itemId} disabled={phase === 'saving'} capped={capped} onPick={jumpTo} />
+          {flash && phase === 'edit' ? <Banner kind="success" role="status">{flash}</Banner> : null}
 
           <article className="review-panel" aria-label="Item to label">
             {current.conversationDate ? (
@@ -1085,10 +1105,21 @@ export function QueueView({
                   {showErrors && errors.labeler ? <div className="form-error" role="alert">{errors.labeler}</div> : <div className="form-hint">Saved in this browser so you do not retype it.</div>}
                 </div>
                 {problem ? <div style={{ marginBottom: '0.8rem' }}><Banner kind="danger" role="alert">{problem}</Banner></div> : null}
+                <label className="row small" style={{ marginBottom: '0.8rem', gap: '0.4rem', cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={revealAfter}
+                    onChange={e => {
+                      setRevealAfter(e.target.checked)
+                      writeStored(REVEAL_AFTER_KEY, e.target.checked ? 'on' : 'off')
+                    }}
+                  />
+                  Show me what the judge said after I save
+                </label>
                 <div className="row">
                   <button type="submit" className="btn btn-primary" disabled={!valid || phase === 'saving'}>
                     {phase === 'saving' ? <span className="spinner" aria-hidden="true" /> : null}
-                    Save label
+                    {revealAfter ? 'Save and show the judge' : 'Save and go to next'}
                   </button>
                   <button type="button" className="btn btn-ghost" onClick={skip} disabled={phase === 'saving'}>Skip (N)</button>
                   {!valid ? <span className="small muted">Choose pass or fail and write a critique to save.</span> : null}
