@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { createFakeProvider, type FakeReply, type Label } from '../../src/index.js'
+import { createFakeProvider, type FakeReply, type GradedLabel, type Label } from '../../src/index.js'
 import type { FindingsResponse, FindingsSummaryPreviewResponse, FindingsSummaryResponse } from '../../src/ui/api-types.js'
 import { label } from '../label-helpers.js'
 import { toJsonl } from '../cli/harness.js'
@@ -29,7 +29,7 @@ criteria:
 `
 const SCENARIO = 'id: s1\nversion: 1\ntarget: stub-agent\nseed_message: hi\nrubric: rubrics/r1.yaml\n'
 
-const lab = (runId: string, criterion: string, verdict: 'pass' | 'fail', over: Partial<Label> = {}): Label =>
+const lab = (runId: string, criterion: string, verdict: 'pass' | 'fail', over: Partial<GradedLabel> = {}): GradedLabel =>
   label({
     id: `${runId}:${criterion}`,
     group: runId,

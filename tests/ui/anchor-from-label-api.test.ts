@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterAll, afterEach, describe, expect, it } from 'vitest'
 import { parse } from 'yaml'
-import type { Label } from '../../src/index.js'
+import type { GradedLabel, Label } from '../../src/index.js'
 import { sha256 } from '../../src/server/rubric-edit.js'
 import type { AnchorFromLabelResponse, LabelsResponse, RubricItem, RubricsResponse } from '../../src/ui/api-types.js'
 import { idInSplit, label } from '../label-helpers.js'
@@ -36,7 +36,7 @@ const TRAIN_2 = idInSplit('train', 'run', 1)
 const DEV = idInSplit('dev', 'run')
 const TEST = idInSplit('test', 'run')
 
-const lab = (runId: string, criterion: string, over: Partial<Label> = {}): Label =>
+const lab = (runId: string, criterion: string, over: Partial<GradedLabel> = {}): GradedLabel =>
   label({
     id: `${runId}:${criterion}`,
     group: runId,
@@ -138,6 +138,16 @@ describe('POST /api/rubrics/:id/anchors/from-label', () => {
       expect(r.json().error.message).toMatch(/Only training labels can become worked examples/)
       expect(r.json().error.message).toMatch(/honest/)
     }
+    expect(readFileSync(healthFile(f), 'utf8')).toBe(before)
+  })
+
+  it('refuses a "does not apply" label with not_applicable_label, and writes nothing', async () => {
+    const f = await make([{ ...lab(TRAIN, 'no-diagnosis'), verdict: 'not_applicable' }])
+    const before = readFileSync(healthFile(f), 'utf8')
+    const item = await itemOf(f, 'health')
+    const r = await addExample(f, 'health', { itemId: `${TRAIN}:no-diagnosis`, baseHash: item.hash })
+    expect(r.status).toBe(422)
+    expect(r.json().error.code).toBe('not_applicable_label')
     expect(readFileSync(healthFile(f), 'utf8')).toBe(before)
   })
 

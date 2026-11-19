@@ -4,7 +4,7 @@ import {
   anchorsFromLabels, ContaminationError, createFakeProvider, createRubricLabelJudge, evaluateJudge, formatReport, loadLabels,
   partition, RubricSchema, splitOf,
 } from '../src/index.js'
-import type { Label, LabelJudge, LabelJudgement } from '../src/index.js'
+import type { GradedLabel as Label, Label as AnyLabel, LabelJudge, LabelJudgement } from '../src/index.js'
 import { idInSplit, label, syntheticLabels } from './label-helpers.js'
 
 const judgeOf = (fn: (l: Label) => LabelJudgement | Promise<LabelJudgement>, anchors: LabelJudge['anchors'] = []): LabelJudge => ({
@@ -35,6 +35,29 @@ describe('evaluateJudge: what gets measured', () => {
 
   it('refuses the train split, since those labels may be in the prompt', async () => {
     await expect(evaluateJudge(labels, judgeOf(agrees), { split: 'train' as 'dev' })).rejects.toThrow(ContaminationError)
+  })
+
+  it('keeps "does not apply" labels out of the rates and the judging, and reports them by criterion', async () => {
+    const devRandom = dev.filter(l => l.sampled_by === 'random')
+    const na = devRandom.slice(0, 3).map(l => l.id)
+    const withNa: AnyLabel[] = labels.map(l => (na.includes(l.id) ? { ...l, verdict: 'not_applicable' as const, critique: 'Nobody asked to book.' } : l))
+    const seen: string[] = []
+    const r = await evaluateJudge(withNa, judgeOf(l => (seen.push(l.id), agrees(l))), { split: 'dev' })
+    expect(seen.some(id => na.includes(id))).toBe(false)
+    expect(r.metrics.n).toBe(devRandom.length - 3)
+    expect(r.inSplit).toBe(dev.length - 3)
+    expect(r.notApplicable).toEqual({
+      count: 3,
+      byCriterion: { confirms: 3 },
+      items: na.map(id => ({ id, criterion: 'confirms', critique: 'Nobody asked to book.' })),
+    })
+    expect(r.warnings.join(' ')).toMatch(/marked 3 dev item\(s\) as "does not apply" where the judge graded the criterion: confirms \(3\)/)
+  })
+
+  it('never turns a "does not apply" label into a few-shot example', () => {
+    const train = partition(labels).train.slice(0, 2)
+    const mixed: AnyLabel[] = [train[0]!, { ...train[1]!, verdict: 'not_applicable' }]
+    expect(anchorsFromLabels(mixed).map(a => a.output)).toEqual([train[0]!.output])
   })
 
   it('computes the two rates against the expert, from what the judge actually said', async () => {

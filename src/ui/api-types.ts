@@ -55,6 +55,7 @@ export type ErrorCode =
   | 'not_revealable' //          404: the label is not for a queue item, or its run is gone
   | 'no_change' //               422: a label revision or rubric edit that changes nothing
   | 'not_train' //               422: only a train-split label can become a worked example
+  | 'not_applicable_label' //   422: a "does not apply" label has no verdict to use as a worked example
   | 'not_in_rubric' //           422: the label's criterion is not a criterion of that rubric
   | 'duplicate_example' //       409: the rubric already has a worked example with this input and output
   | 'no_findings' //             422: a findings summary was asked for with no findings in the filter
@@ -477,7 +478,7 @@ export interface LabelRequest {
   /** From a queue item. The server takes the input, output, group and criterion from the item itself. */
   itemId: string
   labeler: string
-  verdict: 'pass' | 'fail'
+  verdict: 'pass' | 'fail' | 'not_applicable'
   /** Required, on every label. */
   critique: string
 }
@@ -489,7 +490,7 @@ export interface LabelRequest {
  */
 export interface ReviseRequest {
   labeler: string
-  verdict: 'pass' | 'fail'
+  verdict: 'pass' | 'fail' | 'not_applicable'
   /** Required, as on every label. */
   critique: string
 }

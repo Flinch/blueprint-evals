@@ -6,7 +6,7 @@ import { dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { z } from 'zod'
 import { contaminationProblem, ContaminationError } from '../calibration/evaluate.js'
 import {
-  contentKey, isExampleOf, itemIdOfLabel, LabelChainError, resolveLabels, revisionId, splitOf, SplitViolationError, type Label,
+  contentKey, isExampleOf, isGraded, itemIdOfLabel, LabelChainError, resolveLabels, revisionId, splitOf, SplitViolationError, type Label,
 } from '../calibration/labels.js'
 import type { Anchor, Rubric } from '../core/scenario.js'
 import { FRAMEWORK_VERSION } from '../core/version.js'
@@ -143,7 +143,7 @@ const CalibrateStartSchema = z.strictObject({ ...calibrateShape, ...startShape }
 
 const labelAnswerShape = {
   labeler: z.string().trim().min(1, 'labeler is required').max(100),
-  verdict: z.enum(['pass', 'fail']),
+  verdict: z.enum(['pass', 'fail', 'not_applicable']),
   critique: z.string().trim().min(1, 'a critique is required on every label').max(20_000),
 }
 const LabelRequestSchema = z.strictObject({ itemId: z.string().min(1).max(300), ...labelAnswerShape })
@@ -743,6 +743,9 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServer>
       const { current: all } = readResolved()
       const label = all.find(l => itemIdOfLabel(l) === request.itemId)
       if (!label) throw new ApiError(404, 'not_labelled', `Item "${request.itemId}" has no label. Label it first.`)
+      if (!isGraded(label)) {
+        throw new ApiError(422, 'not_applicable_label', 'This label says the criterion does not apply, so it has no pass or fail verdict to show the judge as a worked example.')
+      }
       const split = splitOf(label)
       if (split !== 'train') {
         throw new ApiError(
@@ -912,7 +915,7 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServer>
       const criterion = textParam(query, 'criterion', 200)
       if (criterion === undefined) throw new ApiError(400, 'bad_request', '"criterion" is required.')
       const verdict = query.get('verdict')
-      if (verdict !== 'pass' && verdict !== 'fail') throw new ApiError(400, 'bad_request', '"verdict" must be pass or fail.')
+      if (verdict !== 'pass' && verdict !== 'fail' && verdict !== 'not_applicable') throw new ApiError(400, 'bad_request', '"verdict" must be pass, fail or not_applicable.')
       const labeler = textParam(query, 'labeler', 100)
       const exclude = textParam(query, 'exclude', 300)
       const { all } = readResolved()

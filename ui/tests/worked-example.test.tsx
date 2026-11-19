@@ -163,6 +163,7 @@ describe('review queue: the example button appears only after the label is saved
 
   it('is absent while labelling, and offered with the split badge after the reveal', async () => {
     const user = userEvent.setup()
+    window.localStorage.setItem('evals-ui-reveal-after-save', 'on')
     const fake = installFetch(baseRoutes({
       'POST /api/labels': { status: 201, body: { label: saved } },
       'GET /api/labels/run-fail-1%3Aconfirms-before-acting/reveal': { body: reveal() },
@@ -174,12 +175,7 @@ describe('review queue: the example button appears only after the label is saved
     await user.click(screen.getByRole('button', { name: /^Fail/ }))
     await user.type(screen.getByLabelText('Critique (required)'), 'It cancelled at once.')
     await user.type(screen.getByLabelText('Your name'), 'Sam')
-    await user.click(screen.getByRole('button', { name: 'Save label' }))
-    await screen.findByText('Label saved.')
-    expect(screen.queryByRole('button', { name: 'Use as worked example' })).toBeNull()
-    expect(screen.queryByText('train')).toBeNull()
-
-    await user.click(screen.getByRole('button', { name: 'Reveal what the judge said' }))
+    await user.click(screen.getByRole('button', { name: 'Save and show the judge' }))
     const area = await screen.findByLabelText('Worked example')
     expect(within(area).getByText('train')).toBeInTheDocument()
     expect(within(area).getByRole('button', { name: 'Use as worked example' })).toBeEnabled()

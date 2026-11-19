@@ -246,13 +246,24 @@ scheduling chat fails the no-advice criterion and is never `not_applicable`.
 | Run status | `not_applicable` neither fails a run nor counts as a pass |
 | Overview and run list | Pass rates, failure counts, "most common failing criteria" and average score leave it out. Per-criterion pass, fail and not-applicable counts are kept apart |
 
-**Calibration stays binary.** A label is about one criterion in one output, so a
-labelled item is applicable by definition. Labels remain `pass` or `fail` and the
-label schema is unchanged. The judge that calibration builds
+**Calibration stays binary.** The judge that calibration builds
 (`createRubricLabelJudge`) is created with the option `allowNotApplicable: false`:
 its response schema has only `pass` and `fail`, and its prompt does not mention
 `not_applicable`, so a calibration run cannot come back N/A and no item can drop
 out of the rates for that reason.
+
+**A person can say "does not apply".** An item reaches the queue only when the
+judge graded its criterion, so the judge thought it applied. When the person
+reads the criterion's "does not apply" condition differently, neither pass nor
+fail is honest: pass would count as agreement on an item that tested nothing,
+since the calibration judge must answer pass or fail and almost always says pass
+there. So a label's verdict may be `not_applicable`. Such a label takes the item
+out of the queue, but it never enters agreement rates, blind rates, few-shot
+examples or findings. Calibration reports how many there were per criterion,
+since several on one criterion mean its "does not apply" wording is read two
+ways. A criterion with no such condition always applies, and the labelling page
+says so when the person picks "does not apply" for one. Label files written
+before this contain only `pass` and `fail` and load unchanged.
 
 **The review queue leaves it out.** A person cannot pass or fail something that
 never happened, and the label would have no graded verdict to be measured

@@ -1,7 +1,7 @@
 import { splitOfKey } from '../src/index.js'
-import type { Label, Split } from '../src/index.js'
+import type { GradedLabel, Split } from '../src/index.js'
 
-export const label = (over: Partial<Label> = {}): Label => ({
+export const label = (over: Partial<GradedLabel> = {}): GradedLabel => ({
   id: 'l1', criterion: 'confirms', input: 'Move it', output: 'Done.', verdict: 'fail',
   critique: 'Acted without confirming.', labeler: 'expert-1', sampled_by: 'random', at: '2026-11-12T10:00:00Z', ...over,
 })
@@ -21,7 +21,7 @@ export function idInSplit(split: Split, prefix = 'id', skip = 0): string {
  * alternate, 70 percent are randomly sampled, and every output is unique so
  * content never collides across splits.
  */
-export function syntheticLabels(n = 400): Label[] {
+export function syntheticLabels(n = 400): GradedLabel[] {
   return Array.from({ length: n }, (_, i) =>
     label({
       id: `syn-${i}`,

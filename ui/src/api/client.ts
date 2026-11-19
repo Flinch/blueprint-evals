@@ -122,7 +122,7 @@ export const api = {
   queue: (limit = 25, criterion?: string | null) => get<QueueResponse>(`/api/queue${qs({ limit, criterion })}`),
   postLabel: (body: LabelRequest) => post<LabelResponse>('/api/labels', body),
   labels: () => get<LabelsResponse>('/api/labels'),
-  suggestions: (q: { criterion: string; verdict: 'pass' | 'fail'; labeler?: string; exclude?: string }) =>
+  suggestions: (q: { criterion: string; verdict: 'pass' | 'fail' | 'not_applicable'; labeler?: string; exclude?: string }) =>
     get<LabelSuggestionsResponse>(`/api/labels/suggestions${qs({ ...q })}`),
   reveal: (itemId: string) => get<RevealResponse>(`/api/labels/${encodeURIComponent(itemId)}/reveal`),
   revise: (itemId: string, body: ReviseRequest) => post<LabelResponse>(`/api/labels/${encodeURIComponent(itemId)}/revise`, body),

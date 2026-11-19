@@ -1,7 +1,8 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Label } from '../../src/ui/api-types'
+import { canNotApply, NOT_APPLICABLE_CRITIQUE, REVEAL_AFTER_KEY, RevealView, validateLabel } from '../src/pages/ClassifyPage'
 import { baseRoutes, failure, installEventSource, installFetch, labelStatsFixture, renderApp } from './fake-api'
 import { failingRun, JUDGE_CRITIQUE, queue, queueItem, reveal } from './fixtures'
 
@@ -48,7 +49,9 @@ describe('blind labelling: nothing about the judge before the label is saved', (
     expect(html).not.toMatch(/targeted/i)
     expect(html).not.toContain('targeted-failure')
     expect(html).not.toContain(JUDGE_CRITIQUE)
-    expect(within(item).queryByText(/verdict:|critique:|the judge said/i)).toBeNull()
+    // The opt-in checkbox is the only place the judge is mentioned.
+    const mentions = within(item).queryAllByText(/verdict:|critique:|the judge said/i).map(e => e.textContent?.trim())
+    expect(mentions).toEqual(['Show me what the judge said after I save'])
     expect(within(item).queryByText(/^(pass|fail)$/i)).toBeNull()
     expect(screen.queryByRole('button', { name: /Reveal/ })).toBeNull()
     expect(fake.calls.some(c => c.path.endsWith('/reveal'))).toBe(false)
@@ -66,31 +69,87 @@ describe('blind labelling: nothing about the judge before the label is saved', (
     expect(fake.calls.some(c => c.path.endsWith('/reveal'))).toBe(false)
   })
 
-  it('shows the reveal step only after the label is saved, and fetches the judge only when asked', async () => {
+  it('with the checkbox off, saving moves to the next item with a Saved banner and makes no reveal request', async () => {
     const user = userEvent.setup()
     const fake = installFetch(routes())
+    renderApp('/classify')
+    await screen.findByLabelText('Item to label')
+    expect(screen.getByLabelText('Show me what the judge said after I save')).not.toBeChecked()
+    await user.click(screen.getByRole('button', { name: /^Fail/ }))
+    await user.type(screen.getByLabelText('Critique (required)'), 'It cancelled at once.')
+    await user.type(screen.getByLabelText('Your name'), 'Sam')
+    await user.click(screen.getByRole('button', { name: 'Save and go to next' }))
+
+    expect(await screen.findByText(/Saved: fail for confirms-before-acting \(scenario /)).toBeInTheDocument()
+    expect(await screen.findByText('I can move it to 15:00. Shall I go ahead?')).toBeInTheDocument()
+    expect(screen.queryByText('Label saved.')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Reveal what the judge said' })).toBeNull()
+    expect(screen.queryByText(JUDGE_CRITIQUE)).toBeNull()
+    expect(fake.calls.some(c => c.path.endsWith('/reveal'))).toBe(false)
+    expect(fake.to('POST /api/labels')[0]!.body).toEqual({ itemId: 'run-fail-1:confirms-before-acting', labeler: 'Sam', verdict: 'fail', critique: 'It cancelled at once.' })
+    // The form is reset for the next item.
+    expect(screen.getByRole('button', { name: /^Fail/ })).toHaveAttribute('aria-pressed', 'false')
+    expect(screen.getByLabelText('Critique (required)')).toHaveValue('')
+  })
+
+  it('with the checkbox on, saving fetches the reveal once and shows the judge critique', async () => {
+    const user = userEvent.setup()
+    window.localStorage.setItem(REVEAL_AFTER_KEY, 'on')
+    const fake = installFetch(routes())
+    renderApp('/classify')
+    await screen.findByLabelText('Item to label')
+    expect(screen.getByLabelText('Show me what the judge said after I save')).toBeChecked()
+    await user.click(screen.getByRole('button', { name: /^Fail/ }))
+    await user.type(screen.getByLabelText('Critique (required)'), 'It cancelled at once.')
+    await user.type(screen.getByLabelText('Your name'), 'Sam')
+    // Blind until saved: no reveal request yet.
+    expect(fake.calls.some(c => c.path.endsWith('/reveal'))).toBe(false)
+    await user.click(screen.getByRole('button', { name: 'Save and show the judge' }))
+
+    expect(await screen.findByText('Label saved.')).toBeInTheDocument()
+    expect(await screen.findByText(JUDGE_CRITIQUE)).toBeInTheDocument()
+    expect(screen.getByText('You and the judge agree.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Change my label (E)' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Next item' })).toBeInTheDocument()
+    expect(fake.to('POST /api/labels')[0]!.body).toEqual({ itemId: 'run-fail-1:confirms-before-acting', labeler: 'Sam', verdict: 'fail', critique: 'It cancelled at once.' })
+    expect(fake.to(REVEAL_ROUTE)).toHaveLength(1)
+  })
+
+  it('offers the Reveal button as a fallback when the reveal fetch fails after saving', async () => {
+    const user = userEvent.setup()
+    window.localStorage.setItem(REVEAL_AFTER_KEY, 'on')
+    let calls = 0
+    const fake = installFetch(routes({ [REVEAL_ROUTE]: () => (++calls === 1 ? failure(500, 'internal', 'Reveal broke.') : { body: reveal() }) }))
     renderApp('/classify')
     await screen.findByLabelText('Item to label')
     await user.click(screen.getByRole('button', { name: /^Fail/ }))
     await user.type(screen.getByLabelText('Critique (required)'), 'It cancelled at once.')
     await user.type(screen.getByLabelText('Your name'), 'Sam')
-    await user.click(screen.getByRole('button', { name: 'Save label' }))
-
-    expect(await screen.findByText('Label saved.')).toBeInTheDocument()
-    // Saved, but the judge is still hidden and no reveal request was made.
-    expect(screen.getByRole('button', { name: 'Reveal what the judge said' })).toBeInTheDocument()
-    expect(screen.queryByText(JUDGE_CRITIQUE)).toBeNull()
-    expect(fake.calls.some(c => c.path.endsWith('/reveal'))).toBe(false)
-    expect(fake.to('POST /api/labels')[0]!.body).toEqual({ itemId: 'run-fail-1:confirms-before-acting', labeler: 'Sam', verdict: 'fail', critique: 'It cancelled at once.' })
-
-    await user.click(screen.getByRole('button', { name: 'Reveal what the judge said' }))
+    await user.click(screen.getByRole('button', { name: 'Save and show the judge' }))
+    await user.click(await screen.findByRole('button', { name: 'Reveal what the judge said' }))
     expect(await screen.findByText(JUDGE_CRITIQUE)).toBeInTheDocument()
-    expect(screen.getByText('You and the judge agree.')).toBeInTheDocument()
-    expect(fake.to(REVEAL_ROUTE)).toHaveLength(1)
+    expect(fake.to(REVEAL_ROUTE)).toHaveLength(2)
+  })
+
+  it('ticking the checkbox stores "on" in localStorage, and unticking stores "off"', async () => {
+    const user = userEvent.setup()
+    installFetch(routes())
+    renderApp('/classify')
+    await screen.findByLabelText('Item to label')
+    const box = screen.getByLabelText('Show me what the judge said after I save')
+    expect(window.localStorage.getItem(REVEAL_AFTER_KEY)).toBeNull()
+    expect(screen.getByRole('button', { name: 'Save and go to next' })).toBeInTheDocument()
+    await user.click(box)
+    expect(window.localStorage.getItem(REVEAL_AFTER_KEY)).toBe('on')
+    expect(screen.getByRole('button', { name: 'Save and show the judge' })).toBeInTheDocument()
+    await user.click(box)
+    expect(window.localStorage.getItem(REVEAL_AFTER_KEY)).toBe('off')
+    expect(screen.getByRole('button', { name: 'Save and go to next' })).toBeInTheDocument()
   })
 
   it('shows disagreement plainly', async () => {
     const user = userEvent.setup()
+    window.localStorage.setItem(REVEAL_AFTER_KEY, 'on')
     installFetch(routes({
       'POST /api/labels': { status: 201, body: { label: savedLabel({ verdict: 'pass' }) } },
       [REVEAL_ROUTE]: { body: reveal({ agrees: false, human: { verdict: 'pass', critique: 'Fine.', labeler: 'Sam', at: '2026-11-12T11:00:00.000Z' } }) },
@@ -100,27 +159,27 @@ describe('blind labelling: nothing about the judge before the label is saved', (
     await user.click(screen.getByRole('button', { name: /^Pass/ }))
     await user.type(screen.getByLabelText('Critique (required)'), 'Fine.')
     await user.type(screen.getByLabelText('Your name'), 'Sam')
-    await user.click(screen.getByRole('button', { name: 'Save label' }))
-    await user.click(await screen.findByRole('button', { name: 'Reveal what the judge said' }))
+    await user.click(screen.getByRole('button', { name: 'Save and show the judge' }))
     expect(await screen.findByText('You and the judge disagree.')).toBeInTheDocument()
   })
 
   it('says when the judge never decided the criterion', async () => {
     const user = userEvent.setup()
+    window.localStorage.setItem(REVEAL_AFTER_KEY, 'on')
     installFetch(routes({ [REVEAL_ROUTE]: { body: reveal({ judge: null, agrees: null, runError: 'Judge call failed: timeout' }) } }))
     renderApp('/classify')
     await screen.findByLabelText('Item to label')
     await user.click(screen.getByRole('button', { name: /^Fail/ }))
     await user.type(screen.getByLabelText('Critique (required)'), 'x')
     await user.type(screen.getByLabelText('Your name'), 'Sam')
-    await user.click(screen.getByRole('button', { name: 'Save label' }))
-    await user.click(await screen.findByRole('button', { name: 'Reveal what the judge said' }))
+    await user.click(screen.getByRole('button', { name: 'Save and show the judge' }))
     expect(await screen.findByText('The judge never decided this criterion.')).toBeInTheDocument()
     expect(screen.getByText(/Judge call failed: timeout/)).toBeInTheDocument()
   })
 })
 
 describe('changing a label after the reveal', () => {
+  beforeEach(() => window.localStorage.setItem(REVEAL_AFTER_KEY, 'on'))
   const revisedLabel = savedLabel({ id: 'run-fail-1:confirms-before-acting~r1', replaces: 'run-fail-1:confirms-before-acting', verdict: 'pass', critique: 'It did ask in [1].', at: '2026-11-12T11:05:00.000Z' })
   const revisedReveal = reveal({
     labelId: revisedLabel.id,
@@ -145,7 +204,7 @@ describe('changing a label after the reveal', () => {
     await user.click(screen.getByRole('button', { name: /^Fail/ }))
     await user.type(screen.getByLabelText('Critique (required)'), 'It cancelled at once.')
     await user.type(screen.getByLabelText('Your name'), 'Sam')
-    await user.click(screen.getByRole('button', { name: 'Save label' }))
+    await user.click(screen.getByRole('button', { name: 'Save and show the judge' }))
     await screen.findByText('Label saved.')
   }
 
@@ -155,14 +214,12 @@ describe('changing a label after the reveal', () => {
     renderApp('/classify')
     await screen.findByLabelText('Item to label')
     expect(screen.queryByRole('button', { name: /Change my label/ })).toBeNull()
-    await saveAndReveal(user)
-    // Saved, not revealed: still no change button, and E does nothing.
-    expect(screen.queryByRole('button', { name: /Change my label/ })).toBeNull()
     await user.keyboard('e')
     expect(screen.queryByLabelText('Change the label')).toBeNull()
-    expect(fake.to(REVISE_ROUTE)).toHaveLength(0)
-    await user.click(screen.getByRole('button', { name: 'Reveal what the judge said' }))
+    await saveAndReveal(user)
+    // Saved and revealed at once: the change button is there.
     expect(await screen.findByRole('button', { name: 'Change my label (E)' })).toBeInTheDocument()
+    expect(fake.to(REVISE_ROUTE)).toHaveLength(0)
   })
 
   it('opens a pre-filled form, saves the change, and shows what changed', async () => {
@@ -170,7 +227,6 @@ describe('changing a label after the reveal', () => {
     const fake = installFetch(flowRoutes())
     renderApp('/classify')
     await saveAndReveal(user)
-    await user.click(screen.getByRole('button', { name: 'Reveal what the judge said' }))
     await screen.findByText(JUDGE_CRITIQUE)
     expect(screen.getByText(/change my label/, { selector: 'span' })).toBeInTheDocument()
 
@@ -202,7 +258,6 @@ describe('changing a label after the reveal', () => {
     const fake = installFetch(flowRoutes())
     renderApp('/classify')
     await saveAndReveal(user)
-    await user.click(screen.getByRole('button', { name: 'Reveal what the judge said' }))
     await screen.findByText(JUDGE_CRITIQUE)
     ;(document.activeElement as HTMLElement).blur()
     await user.keyboard('e')
@@ -222,7 +277,6 @@ describe('changing a label after the reveal', () => {
     installFetch(routes({ [REVISE_ROUTE]: failure(422, 'no_change', 'The verdict and critique are the same as the current label, so nothing was saved.') }))
     renderApp('/classify')
     await saveAndReveal(user)
-    await user.click(screen.getByRole('button', { name: 'Reveal what the judge said' }))
     await user.click(await screen.findByRole('button', { name: 'Change my label (E)' }))
     await user.type(screen.getByLabelText('Critique (required)', { selector: '#revise-current-critique' }), ' More.')
     await user.click(screen.getByRole('button', { name: 'Save the change' }))
@@ -237,7 +291,7 @@ describe('blind labelling: validation and controls', () => {
     installFetch(routes())
     renderApp('/classify')
     await screen.findByLabelText('Item to label')
-    const save = screen.getByRole('button', { name: 'Save label' })
+    const save = screen.getByRole('button', { name: 'Save and go to next' })
     expect(save).toBeDisabled()
     await user.click(screen.getByRole('button', { name: /^Pass/ }))
     await user.type(screen.getByLabelText('Your name'), 'Sam')
@@ -262,13 +316,13 @@ describe('blind labelling: validation and controls', () => {
     expect(fake.to('POST /api/labels')).toHaveLength(0)
   })
 
-  it('keyboard: P and F choose, Ctrl+Enter saves from the text box, N skips, and the hint is visible', async () => {
+  it('keyboard: P, F and D choose, Ctrl+Enter saves from the text box, N skips, and the hint is visible', async () => {
     const user = userEvent.setup()
     const fake = installFetch(routes())
     renderApp('/classify')
     await screen.findByLabelText('Item to label')
     const hint = screen.getByText(/skip/i, { selector: 'span' })
-    expect(hint.textContent).toMatch(/pass.*fail.*skip.*submit/)
+    expect(hint.textContent).toMatch(/pass.*fail.*doesn't apply.*skip.*submit/)
 
     // N skips to the back of the list, so the second item comes up, then the first again.
     await user.keyboard('n')
@@ -287,12 +341,12 @@ describe('blind labelling: validation and controls', () => {
     await user.type(screen.getByLabelText('Your name'), 'Sam')
     await user.type(screen.getByLabelText('Critique (required)'), 'Acted without asking.')
     await user.keyboard('{Control>}{Enter}{/Control}')
-    await screen.findByText('Label saved.')
+    await screen.findByText(/Saved: fail for confirms-before-acting/)
     expect(fake.to('POST /api/labels')).toHaveLength(1)
 
-    // N after saving goes to the next item.
-    await user.keyboard('n')
+    // Saving already moved on to the next item.
     expect(await screen.findByText('I can move it to 15:00. Shall I go ahead?')).toBeInTheDocument()
+    expect(fake.calls.some(c => c.path.endsWith('/reveal'))).toBe(false)
   })
 
   it('remembers the labeler name in localStorage, and works when storage throws', async () => {
@@ -303,8 +357,8 @@ describe('blind labelling: validation and controls', () => {
     await user.click(screen.getByRole('button', { name: /^Pass/ }))
     await user.type(screen.getByLabelText('Your name'), 'Alex')
     await user.type(screen.getByLabelText('Critique (required)'), 'Fine.')
-    await user.click(screen.getByRole('button', { name: 'Save label' }))
-    await screen.findByText('Label saved.')
+    await user.click(screen.getByRole('button', { name: 'Save and go to next' }))
+    await screen.findByText(/Saved: /)
     expect(window.localStorage.getItem('evals-ui-labeler')).toBe('Alex')
     first.unmount()
 
@@ -325,8 +379,8 @@ describe('blind labelling: validation and controls', () => {
     await user.click(screen.getByRole('button', { name: /^Pass/ }))
     await user.type(screen.getByLabelText('Your name'), 'Sam')
     await user.type(screen.getByLabelText('Critique (required)'), 'Fine.')
-    await user.click(screen.getByRole('button', { name: 'Save label' }))
-    expect(await screen.findByText('Label saved.')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Save and go to next' }))
+    expect(await screen.findByText(/Saved: /)).toBeInTheDocument()
   })
 
   it('shows the quota status the server reports, progress, and a labelled-so-far summary', async () => {
@@ -356,20 +410,22 @@ describe('blind labelling: validation and controls', () => {
     await user.click(screen.getByRole('button', { name: /^Pass/ }))
     await user.type(screen.getByLabelText('Your name'), 'Sam')
     await user.type(screen.getByLabelText('Critique (required)'), 'ok')
-    await user.click(screen.getByRole('button', { name: 'Save label' }))
+    await user.click(screen.getByRole('button', { name: 'Save and go to next' }))
     expect(await screen.findByText(/already exists\. It is not in your queue any more/)).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Next item' }))
     expect(await screen.findByText('I can move it to 15:00. Shall I go ahead?')).toBeInTheDocument()
   })
 
-  it('shows the earlier conversation only on request', async () => {
+  it('shows the earlier conversation by default, and it can be hidden', async () => {
     const user = userEvent.setup()
     installFetch(routes({ 'GET /api/queue': { body: queue({ items: [queueItem({ context: [{ index: 0, role: 'user', content: 'EARLIER-USER-LINE' }, { index: 1, role: 'assistant', content: 'EARLIER-AGENT-LINE', toolCalls: [{ name: 'lookup', arguments: { a: 1 } }] }] })] }) } }))
     renderApp('/classify')
     await screen.findByLabelText('Item to label')
-    expect(screen.queryByText('EARLIER-AGENT-LINE')).toBeNull()
-    await user.click(screen.getByRole('button', { name: /Show the earlier conversation \(2 turns, 1 tool call\)/ }))
     expect(screen.getByText('EARLIER-AGENT-LINE')).toBeInTheDocument()
+    expect(screen.getByText(/Judge the whole conversation, not only this reply/)).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Hide the earlier conversation' }))
+    expect(screen.queryByText('EARLIER-AGENT-LINE')).toBeNull()
+    expect(screen.getByRole('button', { name: /Show the earlier conversation \(2 turns, 1 tool call\)/ })).toBeInTheDocument()
   })
 
   it('shows an empty state with the server note when nothing is up for review', async () => {
@@ -383,6 +439,127 @@ describe('blind labelling: validation and controls', () => {
     installFetch(routes({ 'GET /api/queue': failure(500, 'internal', 'The queue broke.') }))
     renderApp('/classify')
     expect(await screen.findByText(/The queue broke\./)).toBeInTheDocument()
+  })
+})
+
+describe("the Doesn't apply verdict", () => {
+  const NA_ROUTE = 'POST /api/labels'
+  const naText = 'Gives no medical advice. This does not apply if the caller never asks a medical question.'
+  const naItem = () => queueItem({ criterion: { id: 'confirms-before-acting', text: naText, critical: false } })
+
+  it('is chosen by clicking the button or pressing D', async () => {
+    const user = userEvent.setup()
+    installFetch(routes())
+    renderApp('/classify')
+    await screen.findByLabelText('Item to label')
+    const na = screen.getByRole('button', { name: "Doesn't apply (D)" })
+    expect(na).toHaveAttribute('aria-pressed', 'false')
+    await user.click(na)
+    expect(na).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('button', { name: /^Pass/ })).toHaveAttribute('aria-pressed', 'false')
+    await user.click(screen.getByRole('button', { name: /^Pass/ }))
+    expect(na).toHaveAttribute('aria-pressed', 'false')
+    ;(document.activeElement as HTMLElement).blur()
+    await user.keyboard('d')
+    expect(na).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  it('saves with an empty critique as not_applicable with the standard critique, and the critique label turns optional', async () => {
+    const user = userEvent.setup()
+    const fake = installFetch(routes({ [NA_ROUTE]: { status: 201, body: { label: savedLabel({ verdict: 'not_applicable', critique: NOT_APPLICABLE_CRITIQUE }) } }, 'GET /api/queue': { body: queue({ items: [naItem(), queueItem({ itemId: 'x:y' })] }) } }))
+    renderApp('/classify')
+    await screen.findByLabelText('Item to label')
+    expect(screen.getByLabelText('Critique (required)')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: "Doesn't apply (D)" }))
+    expect(screen.getByLabelText('Critique (optional)')).toHaveValue('')
+    await user.type(screen.getByLabelText('Your name'), 'Sam')
+    const save = screen.getByRole('button', { name: 'Save and go to next' })
+    expect(save).toBeEnabled()
+    await user.click(save)
+    expect(await screen.findByText(/Saved: /)).toBeInTheDocument()
+    expect(fake.to(NA_ROUTE)[0]!.body).toEqual({ itemId: 'run-fail-1:confirms-before-acting', labeler: 'Sam', verdict: 'not_applicable', critique: NOT_APPLICABLE_CRITIQUE })
+  })
+
+  it('sends a typed critique as it is when one is given', async () => {
+    const user = userEvent.setup()
+    const fake = installFetch(routes({ 'GET /api/queue': { body: queue({ items: [naItem(), queueItem({ itemId: 'x:y' })] }) } }))
+    renderApp('/classify')
+    await screen.findByLabelText('Item to label')
+    await user.click(screen.getByRole('button', { name: "Doesn't apply (D)" }))
+    await user.type(screen.getByLabelText('Critique (optional)'), 'No medical question came up.')
+    await user.type(screen.getByLabelText('Your name'), 'Sam')
+    await user.click(screen.getByRole('button', { name: 'Save and go to next' }))
+    await waitFor(() => expect(fake.to(NA_ROUTE)).toHaveLength(1))
+    expect(fake.to(NA_ROUTE)[0]!.body).toMatchObject({ verdict: 'not_applicable', critique: 'No medical question came up.' })
+  })
+
+  it('warns that a criterion always applies when its text has no "does not apply" condition', async () => {
+    const user = userEvent.setup()
+    installFetch(routes())
+    renderApp('/classify')
+    await screen.findByLabelText('Item to label')
+    expect(screen.queryByText(/always applies/)).toBeNull()
+    await user.click(screen.getByRole('button', { name: "Doesn't apply (D)" }))
+    expect(screen.getByText(/has no "does not apply" condition, so it always applies/)).toBeInTheDocument()
+    expect(screen.queryByText(/A critique is optional\./)).toBeNull()
+  })
+
+  it('shows the optional-critique hint instead of the warning when the criterion has a "does not apply" condition', async () => {
+    const user = userEvent.setup()
+    installFetch(routes({ 'GET /api/queue': { body: queue({ items: [naItem()] }) } }))
+    renderApp('/classify')
+    await screen.findByLabelText('Item to label')
+    await user.click(screen.getByRole('button', { name: "Doesn't apply (D)" }))
+    expect(screen.getByText(/A critique is optional\./)).toBeInTheDocument()
+    expect(screen.queryByText(/always applies/)).toBeNull()
+  })
+
+  it('is offered in the Change my label form, and the revise request carries not_applicable', async () => {
+    const user = userEvent.setup()
+    window.localStorage.setItem(REVEAL_AFTER_KEY, 'on')
+    const fake = installFetch(routes({ [REVISE_ROUTE]: { status: 201, body: { label: savedLabel({ id: 'run-fail-1:confirms-before-acting~r1', replaces: 'run-fail-1:confirms-before-acting', verdict: 'not_applicable', critique: NOT_APPLICABLE_CRITIQUE }) } } }))
+    renderApp('/classify')
+    await screen.findByLabelText('Item to label')
+    await user.click(screen.getByRole('button', { name: /^Fail/ }))
+    await user.type(screen.getByLabelText('Critique (required)'), 'It cancelled at once.')
+    await user.type(screen.getByLabelText('Your name'), 'Sam')
+    await user.click(screen.getByRole('button', { name: 'Save and show the judge' }))
+    await user.click(await screen.findByRole('button', { name: 'Change my label (E)' }))
+    const form = screen.getByLabelText('Change the label')
+    await user.click(within(form).getByRole('button', { name: "Doesn't apply" }))
+    expect(within(form).getByRole('button', { name: "Doesn't apply" })).toHaveAttribute('aria-pressed', 'true')
+    await user.clear(within(form).getByLabelText(/^Critique/))
+    await user.click(within(form).getByRole('button', { name: 'Save the change' }))
+    await waitFor(() => expect(fake.to(REVISE_ROUTE)).toHaveLength(1))
+    expect(fake.to(REVISE_ROUTE)[0]!.body).toEqual({ verdict: 'not_applicable', critique: NOT_APPLICABLE_CRITIQUE, labeler: 'Sam' })
+  })
+})
+
+describe('RevealView for a "does not apply" label', () => {
+  it('says the person said the criterion does not apply, instead of agree or disagree', () => {
+    render(<RevealView reveal={reveal({ agrees: false, human: { verdict: 'not_applicable', critique: NOT_APPLICABLE_CRITIQUE, labeler: 'Sam', at: '2026-11-12T11:00:00.000Z' } })} />)
+    expect(screen.getByText('You said this criterion does not apply.')).toBeInTheDocument()
+    expect(screen.queryByText('You and the judge agree.')).toBeNull()
+    expect(screen.queryByText('You and the judge disagree.')).toBeNull()
+    expect(screen.getByText(JUDGE_CRITIQUE)).toBeInTheDocument()
+  })
+})
+
+describe('canNotApply and validateLabel', () => {
+  it('canNotApply finds a "does not apply" phrase, and treats unknown text as able to', () => {
+    expect(canNotApply('Gives no medical advice.')).toBe(false)
+    expect(canNotApply('Asks first. This does not apply if nothing changed.')).toBe(true)
+    expect(canNotApply("Doesn't apply when no booking exists.")).toBe(true)
+    expect(canNotApply('N/A: not applicable without a booking.')).toBe(true)
+    expect(canNotApply('DOES NOT APPLY if silent')).toBe(true)
+    expect(canNotApply(undefined)).toBe(true)
+    expect(canNotApply(null)).toBe(true)
+  })
+
+  it('validateLabel names all three verdicts, and does not need a critique for not_applicable', () => {
+    expect(validateLabel({ verdict: null, critique: 'x', labeler: 'Sam' }).verdict).toBe("Choose pass, fail or doesn't apply.")
+    expect(validateLabel({ verdict: 'not_applicable', critique: '', labeler: 'Sam' })).toEqual({})
+    expect(validateLabel({ verdict: 'fail', critique: '  ', labeler: 'Sam' }).critique).toBe('A critique is required on every label.')
   })
 })
 
@@ -505,7 +682,7 @@ describe('the evidence the judge sees, shown to the person labelling', () => {
     expect(within(panel).getByText('timeout')).toHaveClass('toolcall-error')
 
     // The earlier turns' calls and results.
-    await user.click(within(panel).getByRole('button', { name: /Show the earlier conversation \(3 turns, 1 tool call\)/ }))
+    // The earlier conversation is open by default.
     const earlier = within(panel).getByRole('button', { name: /Tool call: find_appointment/ })
     expect(within(earlier).getByText('found')).not.toHaveClass('badge-fail')
     await user.click(earlier)

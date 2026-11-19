@@ -163,6 +163,16 @@ describe('POST /api/labels', () => {
     expect((await f.api.get('/api/labels')).json<LabelsResponse>()).toMatchObject({ file: labelsFile(f), stats: { total: 1 } })
   })
 
+  it('accepts "does not apply": the item leaves the queue and the stats count it apart from pass and fail', async () => {
+    const f = await seeded()
+    const item = (await queue(f, '?limit=10')).items[0]!
+    const r = await f.api.post('/api/labels', labelBody(item.itemId, { verdict: 'not_applicable', critique: 'Does not apply to this reply.' }))
+    expect(r.status).toBe(201)
+    expect(r.json().label.verdict).toBe('not_applicable')
+    expect((await queue(f, '?limit=100')).items.some(i => i.itemId === item.itemId)).toBe(false)
+    expect((await f.api.get('/api/labels')).json<LabelsResponse>().stats.byVerdict).toEqual({ pass: 0, fail: 0, notApplicable: 1 })
+  })
+
   it('records sampled_by from the server\'s plan: a client cannot claim an item was random', async () => {
     const f = await seeded()
     const items = (await queue(f, '?limit=40')).items

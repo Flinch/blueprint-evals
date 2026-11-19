@@ -190,6 +190,7 @@ describe('links to a criterion', () => {
   it('Classify links the criterion before the label, and again in the reveal', async () => {
     const user = userEvent.setup()
     const item = queueItem({ scenarioId: 'reschedule-tomorrow-3pm' })
+    window.localStorage.setItem('evals-ui-reveal-after-save', 'on')
     installFetch(
       baseRoutes({
         'GET /api/queue': { body: queue({ items: [item] }) },
@@ -206,8 +207,7 @@ describe('links to a criterion', () => {
     await user.click(within(panel).getByRole('button', { name: /Fail/ }))
     await user.type(within(panel).getByLabelText('Critique (required)'), 'It cancelled at once.')
     await user.type(within(panel).getByLabelText('Your name'), 'Sam')
-    await user.click(within(panel).getByRole('button', { name: 'Save label' }))
-    await user.click(await screen.findByRole('button', { name: 'Reveal what the judge said' }))
+    await user.click(within(panel).getByRole('button', { name: 'Save and show the judge' }))
     const judged = await screen.findByLabelText('What the judge said')
     expect(within(judged).getByRole('link', { name: 'View or edit this criterion' })).toHaveAttribute('href', want)
   })

@@ -42,11 +42,22 @@ export interface FormErrors {
 }
 
 /** Same rules as the server: a verdict, a critique and a labeler, both text fields non-blank after trimming and within their limits. */
-export function validateLabel(v: { verdict: 'pass' | 'fail' | null; critique: string; labeler: string }): FormErrors {
+export type HumanVerdict = 'pass' | 'fail' | 'not_applicable'
+
+/** What is saved when "Doesn't apply" is chosen with nothing typed. */
+export const NOT_APPLICABLE_CRITIQUE = 'Does not apply to this reply.'
+
+/** Whether a criterion's text has a "does not apply" condition. One without it always applies, so nothing going wrong is a pass. */
+export function canNotApply(criterionText: string | undefined | null): boolean {
+  return criterionText == null || /does not apply|doesn't apply|not applicable/i.test(criterionText)
+}
+
+/** Same rules as the server: a verdict, a critique and a labeler, both text fields non-blank after trimming and within their limits. "Doesn't apply" needs no typed critique. */
+export function validateLabel(v: { verdict: HumanVerdict | null; critique: string; labeler: string }): FormErrors {
   const errors: FormErrors = {}
-  if (v.verdict === null) errors.verdict = 'Choose pass or fail.'
+  if (v.verdict === null) errors.verdict = 'Choose pass, fail or doesn\'t apply.'
   const critique = v.critique.trim()
-  if (critique === '') errors.critique = 'A critique is required on every label.'
+  if (critique === '' && v.verdict !== 'not_applicable') errors.critique = 'A critique is required on every label.'
   else if (critique.length > MAX_CRITIQUE) errors.critique = `The critique is over ${MAX_CRITIQUE.toLocaleString('en-US')} characters.`
   const labeler = v.labeler.trim()
   if (labeler === '') errors.labeler = 'Enter your name so the label has an author.'
@@ -94,6 +105,7 @@ function LabelledSummary({ stats }: { stats: LabelStats | null }) {
         <dt>Labels</dt><dd>{stats.total}</dd>
         <dt>Pass</dt><dd>{stats.byVerdict.pass}</dd>
         <dt>Fail</dt><dd>{stats.byVerdict.fail}</dd>
+        {stats.byVerdict.notApplicable ? <><dt>Doesn't apply</dt><dd>{stats.byVerdict.notApplicable}</dd></> : null}
         <dt>Random</dt><dd>{stats.random}</dd>
       </dl>
     </div>
@@ -187,7 +199,7 @@ export function applyDeepLink(items: QueueItem[], itemId: string | undefined | n
 }
 
 /** Something typed or chosen that switching items would throw away. */
-export function hasDraft(v: { verdict: 'pass' | 'fail' | null; critique: string }): boolean {
+export function hasDraft(v: { verdict: HumanVerdict | null; critique: string }): boolean {
   return v.verdict !== null || v.critique.trim() !== ''
 }
 
@@ -340,7 +352,7 @@ export function insertSuggestion(current: string, phrase: string): string {
 }
 
 /** The person's earlier critiques for a criterion and verdict, fetched once a verdict is chosen. Null while loading, with no verdict, or on any error. */
-export function useSuggestions(q: { criterion: string | null; verdict: 'pass' | 'fail' | null; labeler: string; exclude?: string }): LabelSuggestionsResponse | null {
+export function useSuggestions(q: { criterion: string | null; verdict: HumanVerdict | null; labeler: string; exclude?: string }): LabelSuggestionsResponse | null {
   const [data, setData] = useState<LabelSuggestionsResponse | null>(null)
   const labeler = q.labeler.trim()
   useEffect(() => {
@@ -393,7 +405,7 @@ export function QuickCritiques({ data, disabled = false, onPick }: { data: Label
 
 // ---------------------------------------------------------------- reveal view
 
-const verdictWord = (v: 'pass' | 'fail') => (v === 'pass' ? 'Pass' : 'Fail')
+const verdictWord = (v: HumanVerdict) => (v === 'pass' ? 'Pass' : v === 'fail' ? 'Fail' : 'Doesn\'t apply')
 
 /**
  * Opens the criterion on the Scenarios page, where the rubric can be edited. The
@@ -430,6 +442,10 @@ export function RevealView({ reveal, criterion }: { reveal: RevealResponse; crit
       ) : judge.verdict === 'not_applicable' ? (
         <Banner kind="info" title="The judge found this criterion not applicable.">
           Its situation never arose in the run, so the judge did not grade it and there is no verdict to compare with.
+        </Banner>
+      ) : human.verdict === 'not_applicable' ? (
+        <Banner kind="info" role="status">
+          <span className="agree-banner">You said this criterion does not apply.</span> The judge graded it {judge.verdict}. This label is kept out of the agreement rates and counted as a difference in reading the criterion.
         </Banner>
       ) : reveal.agrees ? (
         <Banner kind="success" role="status"><span className="agree-banner">You and the judge agree.</span> Both said {human.verdict}.</Banner>
@@ -496,7 +512,7 @@ export function ReviseForm({
   /** How many quick critiques are on offer, for a shortcut hint outside the form. */
   onSuggestions?(count: number): void
 }) {
-  const [verdict, setVerdict] = useState<'pass' | 'fail' | null>(current.verdict)
+  const [verdict, setVerdict] = useState<HumanVerdict | null>(current.verdict)
   const [critique, setCritique] = useState(current.critique)
   const [labeler, setLabeler] = useState(() => readStored(LABELER_KEY) ?? current.labeler)
   const [saving, setSaving] = useState(false)
@@ -523,7 +539,7 @@ export function ReviseForm({
     setSaving(true)
     setProblem(null)
     try {
-      const res = await api.revise(itemId, { verdict, critique: critique.trim(), labeler: labeler.trim() })
+      const res = await api.revise(itemId, { verdict, critique: critique.trim() || NOT_APPLICABLE_CRITIQUE, labeler: labeler.trim() })
       writeStored(LABELER_KEY, labeler.trim())
       onSaved(res.label)
     } catch (e) {
@@ -559,6 +575,7 @@ export function ReviseForm({
         <div className="verdict-toggle" role="group" aria-labelledby={ids.verdict}>
           <button type="button" className="btn btn-success" aria-pressed={verdict === 'pass'} onClick={() => setVerdict('pass')}>Pass</button>
           <button type="button" className="btn btn-danger btn-fail" aria-pressed={verdict === 'fail'} onClick={() => setVerdict('fail')}>Fail</button>
+          <button type="button" className="btn btn-ghost" aria-pressed={verdict === 'not_applicable'} onClick={() => setVerdict('not_applicable')}>Doesn't apply</button>
         </div>
       </div>
       <div className="form-group">
@@ -623,7 +640,7 @@ export function QueueView({
   const [stats, setStats] = useState<QueueStats | null>(null)
   const [labelStats, setLabelStats] = useState<LabelStats | null>(null)
   const [sessionDone, setSessionDone] = useState(0)
-  const [verdict, setVerdict] = useState<'pass' | 'fail' | null>(null)
+  const [verdict, setVerdict] = useState<HumanVerdict | null>(null)
   const [critique, setCritique] = useState('')
   const [labeler, setLabeler] = useState(() => readStored(LABELER_KEY) ?? '')
   const [phase, setPhase] = useState<Phase>('edit')
@@ -631,7 +648,8 @@ export function QueueView({
   const [reveal, setReveal] = useState<RevealResponse | null>(null)
   const [tried, setTried] = useState(false)
   const [problem, setProblem] = useState<string | null>(null)
-  const [showContext, setShowContext] = useState(false)
+  // Open by default: the criterion is judged on the whole conversation, and a mistake is often in an earlier turn.
+  const [showContext, setShowContext] = useState(true)
   const [skipped, setSkipped] = useState(0)
   const [linkMissing, setLinkMissing] = useState(false)
   const [reviseChips, setReviseChips] = useState(0)
@@ -691,7 +709,7 @@ export function QueueView({
     setReveal(null)
     setTried(false)
     setProblem(null)
-    setShowContext(false)
+    setShowContext(true)
     setItemMeta(null)
   }
 
@@ -790,12 +808,12 @@ export function QueueView({
     setPhase('saving')
     setProblem(null)
     try {
-      const res = await api.postLabel({ itemId: current.itemId, labeler: labeler.trim(), verdict, critique: critique.trim() })
+      const res = await api.postLabel({ itemId: current.itemId, labeler: labeler.trim(), verdict, critique: critique.trim() || NOT_APPLICABLE_CRITIQUE })
       writeStored(LABELER_KEY, labeler.trim())
       setSessionDone(n => n + 1)
       refreshStats()
       if (!revealAfter) {
-        setFlash(`Saved: ${res.label.verdict} for ${current.criterion.id} (scenario ${current.scenarioId}).`)
+        setFlash(`Saved: ${verdictWord(res.label.verdict).toLowerCase()} for ${current.criterion.id} (scenario ${current.scenarioId}).`)
         next()
         return
       }
@@ -881,6 +899,9 @@ export function QueueView({
           setVerdict('fail')
           critiqueRef.current?.focus()
           e.preventDefault()
+        } else if (key === 'd') {
+          setVerdict('not_applicable')
+          e.preventDefault()
         } else if (key === 'n') skip()
         else if (key === 'enter' && !isActivatable(e.target)) void submit()
       } else if (phase === 'saved' || phase === 'revealed') {
@@ -906,7 +927,7 @@ export function QueueView({
     () =>
       phase === 'edit' ? (
         <>
-          <span className="kbd">P</span> pass &middot; <span className="kbd">F</span> fail &middot; <span className="kbd">N</span> skip &middot; <span className="kbd">Enter</span> submit
+          <span className="kbd">P</span> pass &middot; <span className="kbd">F</span> fail &middot; <span className="kbd">D</span> doesn't apply &middot; <span className="kbd">N</span> skip &middot; <span className="kbd">Enter</span> submit
           &middot; <span className="kbd">Ctrl</span>+<span className="kbd">Enter</span> submits while typing{chipKeys(editChips)}
         </>
       ) : phase === 'revising' ? (
@@ -1037,7 +1058,8 @@ export function QueueView({
               ) : null}
             </div>
             <div className="review-section">
-              <div className="review-label">The reply being judged (turn [{current.outputTurn}])</div>
+              <div className="review-label">The last reply (turn [{current.outputTurn}])</div>
+              <p className="small muted" style={{ marginBottom: '0.4rem' }}>Judge the whole conversation, not only this reply. A mistake in any earlier turn counts.</p>
               <div className="review-text">{current.output}</div>
               {current.outputToolCalls?.length ? (
                 <div aria-label="Tool calls in the reply being judged" style={{ marginTop: '0.5rem' }}>
@@ -1068,11 +1090,21 @@ export function QueueView({
                   <div className="verdict-toggle" role="group" aria-labelledby="verdict-label">
                     <button type="button" className="btn btn-success" aria-pressed={verdict === 'pass'} onClick={() => setVerdict('pass')}>Pass (P)</button>
                     <button type="button" className="btn btn-danger btn-fail" aria-pressed={verdict === 'fail'} onClick={() => setVerdict('fail')}>Fail (F)</button>
+                    <button type="button" className="btn btn-ghost" aria-pressed={verdict === 'not_applicable'} onClick={() => setVerdict('not_applicable')}>Doesn't apply (D)</button>
                   </div>
                   {showErrors && errors.verdict ? <div className="form-error" role="alert">{errors.verdict}</div> : null}
+                  {verdict === 'not_applicable' ? (
+                    canNotApply(current.criterion.text) ? (
+                      <div className="form-hint">The situation this criterion is about never came up in this reply. Kept out of the agreement rates and counted as a difference in how you and the judge read the criterion. A critique is optional.</div>
+                    ) : (
+                      <Banner kind="warning" role="status">
+                        This criterion has no "does not apply" condition, so it always applies. If the reply did nothing wrong here, that is a pass.
+                      </Banner>
+                    )
+                  ) : null}
                 </div>
                 <div className="form-group">
-                  <label className="form-label" htmlFor="critique">Critique (required)</label>
+                  <label className="form-label" htmlFor="critique">{verdict === 'not_applicable' ? 'Critique (optional)' : 'Critique (required)'}</label>
                   <textarea
                     id="critique"
                     ref={critiqueRef}

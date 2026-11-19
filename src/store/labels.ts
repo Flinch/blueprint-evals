@@ -101,7 +101,8 @@ export interface LabelStats {
   /** Share of labels that are randomly sampled, or null with no labels. */
   randomShare: number | null
   minRandomShare: number
-  byVerdict: { pass: number; fail: number }
+  /** `notApplicable` is absent from answers by servers older than the "does not apply" label. */
+  byVerdict: { pass: number; fail: number; notApplicable?: number }
   bySplit: Record<Split, number>
   labelers: string[]
   /** Items whose label was changed after it was first saved. */
@@ -122,7 +123,7 @@ export function labelStats(all: Label[]): LabelStats {
     targeted: labels.length - random,
     randomShare: labels.length === 0 ? null : random / labels.length,
     minRandomShare: MIN_RANDOM_SHARE,
-    byVerdict: { pass: labels.filter(l => l.verdict === 'pass').length, fail: labels.filter(l => l.verdict === 'fail').length },
+    byVerdict: { pass: labels.filter(l => l.verdict === 'pass').length, fail: labels.filter(l => l.verdict === 'fail').length, notApplicable: labels.filter(l => l.verdict === 'not_applicable').length },
     bySplit,
     labelers: [...new Set(labels.map(l => l.labeler))].sort(),
     revisions: revised.size,

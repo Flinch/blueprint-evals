@@ -240,6 +240,7 @@ what a front end should switch on. `details` is present for `plan_invalid`
 | 422 | `plan_invalid` | Scenarios or selection cannot run. `details.errors` lists them |
 | 422 | `item_not_in_queue` | The item exists but is not up for review |
 | 422 | `not_train` | A worked example from a dev or test label. Only train labels can become worked examples |
+| 422 | `not_applicable_label` | A worked example from a "does not apply" label, which has no pass or fail verdict to show |
 | 422 | `not_in_rubric` | A worked example whose label is about a criterion the rubric does not have |
 | 422 | `no_findings` | A findings summary for filters with no findings |
 | 422 | `no_change` | A revision with the same verdict and critique as the current label, or a rubric edit identical to the file |
@@ -380,6 +381,7 @@ interface AnchorFromLabelRequest { itemId: string; baseHash: string; input?: str
 - 404 `not_labelled` when the item has no current label.
 - 422 `not_train` when the label's split is dev or test: those labels must stay
   unseen by the judge, or calibration would grade it on examples it was shown.
+- 422 `not_applicable_label` when the label says the criterion does not apply.
 - 404 `not_found` for an unknown rubric, 409 `stale` when the file's hash is not
   `baseHash`, and 422 `not_in_rubric` when the label's criterion is not one of
   the rubric's.
@@ -1204,6 +1206,7 @@ export type ErrorCode =
   | 'not_revealable' //          404: the label is not for a queue item, or its run is gone
   | 'no_change' //               422: a label revision or rubric edit that changes nothing
   | 'not_train' //               422: only a train-split label can become a worked example
+  | 'not_applicable_label' //   422: a "does not apply" label has no verdict to use as a worked example
   | 'not_in_rubric' //           422: the label's criterion is not a criterion of that rubric
   | 'duplicate_example' //       409: the rubric already has a worked example with this input and output
   | 'no_findings' //             422: a findings summary was asked for with no findings in the filter
@@ -1626,7 +1629,7 @@ export interface LabelRequest {
   /** From a queue item. The server takes the input, output, group and criterion from the item itself. */
   itemId: string
   labeler: string
-  verdict: 'pass' | 'fail'
+  verdict: 'pass' | 'fail' | 'not_applicable'
   /** Required, on every label. */
   critique: string
 }
@@ -1638,7 +1641,7 @@ export interface LabelRequest {
  */
 export interface ReviseRequest {
   labeler: string
-  verdict: 'pass' | 'fail'
+  verdict: 'pass' | 'fail' | 'not_applicable'
   /** Required, as on every label. */
   critique: string
 }

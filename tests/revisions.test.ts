@@ -3,7 +3,7 @@ import {
   checkLabels, contaminationProblem, evaluateJudge, formatReport, itemIdOfLabel, LabelChainError, parseLabels, partition, resolveLabels,
   revisionId, splitOf,
 } from '../src/index.js'
-import type { Label, LabelJudge, LabelJudgement } from '../src/index.js'
+import type { GradedLabel as Label, LabelJudge, LabelJudgement } from '../src/index.js'
 import { idInSplit, label, syntheticLabels } from './label-helpers.js'
 
 // A changed label is a new line that replaces the current one. The blind label

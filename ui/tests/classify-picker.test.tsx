@@ -210,13 +210,15 @@ describe('Jump to an item', () => {
 
   it('drops an item that was just labelled when the person jumps away from it, as Next does', async () => {
     const user = userEvent.setup()
+    // With the reveal on, the labelled item stays on screen until the person moves.
+    window.localStorage.setItem('evals-ui-reveal-after-save', 'on')
     installFetch(routes({ 'POST /api/labels': { status: 201, body: { label: { id: A.itemId, group: 'run-a', criterion: 'crit-1', output: 'x', verdict: 'fail', critique: 'c', labeler: 'Sam', sampled_by: 'targeted', at: '2026-11-12T11:00:00.000Z' } } } }))
     renderApp('/classify')
     await screen.findByLabelText('Item to label')
     await user.click(screen.getByRole('button', { name: /^Fail/ }))
     await user.type(screen.getByLabelText('Critique (required)'), 'c')
     await user.type(screen.getByLabelText('Your name'), 'Sam')
-    await user.click(screen.getByRole('button', { name: 'Save label' }))
+    await user.click(screen.getByRole('button', { name: 'Save and show the judge' }))
     await screen.findByText('Label saved.')
     await user.selectOptions(screen.getByLabelText('Jump to an item', { selector: 'select' }), 'run-c:crit-2')
     expect(await screen.findByText('OUTPUT-C')).toBeInTheDocument()

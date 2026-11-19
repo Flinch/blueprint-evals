@@ -3,7 +3,7 @@ import type { ModelProvider } from '../core/interfaces.js'
 import { ScenarioSchema, type Anchor, type Rubric } from '../core/scenario.js'
 import { addUsage, judgedResponse, ZERO_USAGE, type Effort, type Trace, type Turn, type Usage } from '../core/trace.js'
 import { FRAMEWORK_VERSION } from '../core/version.js'
-import { checkLabels, contentKey, itemIdOfLabel, resolveLabels, splitOf, type Label, type Split } from './labels.js'
+import { checkLabels, contentKey, isGraded, itemIdOfLabel, resolveLabels, splitOf, type GradedLabel, type Label, type Split } from './labels.js'
 import { computeMetrics, type Metrics, type Verdict } from './metrics.js'
 
 // Measures a judge against expert labels. The judge declares the few-shot
@@ -22,7 +22,7 @@ export interface LabelJudge {
   /** The few-shot examples in this judge's prompt. Checked against everything it is evaluated on. */
   anchors: Anchor[]
   /** Judges one label's response. Throws on failure, which is reported and kept out of the metrics. */
-  judge(label: Label): Promise<LabelJudgement>
+  judge(label: GradedLabel): Promise<LabelJudgement>
   /** What this judge is shown for a label (see LabelEvidence). A judge that has it gets `evidence` counts in its report. */
   evidenceOf?(label: Label): LabelEvidenceKind
 }
@@ -96,6 +96,13 @@ export interface CalibrationReport {
   inSplit: number
   /** Labels left out because they were targeted and selection is `random`. */
   excludedTargeted: number
+  /**
+   * Labels in the split where the person said the criterion does not apply. The
+   * judge graded each of these (that is how they reached the queue), so each is
+   * a disagreement about whether the criterion applies. Never in the rates.
+   * Absent from reports saved before this existed.
+   */
+  notApplicable?: { count: number; byCriterion: Record<string, number>; items: { id: string; criterion: string; critique: string }[] }
   metrics: Metrics
   items: EvaluatedItem[]
   /** Items where the judge disagreed with the expert, for reading. */
@@ -148,11 +155,23 @@ export async function evaluateJudge(all: Label[], judge: LabelJudge, options: Ev
   }
   const { current: labels, history } = resolveLabels(all)
   const blindOf = (l: Label) => history.get(itemIdOfLabel(l))?.[0]
+  // A blind label of "does not apply" has no verdict to score, so the item is left out of the blind rates.
+  const blindVerdict = (l: Label) => {
+    const b = blindOf(l)
+    return b && isGraded(b) ? b.verdict : undefined
+  }
 
   const contamination = contaminationProblem(labels, judge.anchors)
   if (contamination) throw new ContaminationError(contamination)
 
-  const inSplit = labels.filter(l => splitOf(l) === options.split)
+  const splitLabels = labels.filter(l => splitOf(l) === options.split)
+  const naLabels = splitLabels.filter(l => !isGraded(l))
+  const notApplicable = {
+    count: naLabels.length,
+    byCriterion: naLabels.reduce<Record<string, number>>((acc, l) => ({ ...acc, [l.criterion]: (acc[l.criterion] ?? 0) + 1 }), {}),
+    items: naLabels.map(l => ({ id: itemIdOfLabel(l), criterion: l.criterion, critique: l.critique })),
+  }
+  const inSplit = splitLabels.filter(isGraded)
   const eligible = selection === 'random' ? inSplit.filter(l => l.sampled_by === 'random') : inSplit
   const excludedTargeted = inSplit.length - eligible.length
 
@@ -166,7 +185,7 @@ export async function evaluateJudge(all: Label[], judge: LabelJudge, options: Ev
     try {
       const j = await judge.judge(label)
       if (j.usage) usage = addUsage(usage, j.usage)
-      const blind = blindOf(label)
+      const blind = blindVerdict(label)
       items.push({
         id: itemIdOfLabel(label),
         criterion: label.criterion,
@@ -175,7 +194,7 @@ export async function evaluateJudge(all: Label[], judge: LabelJudge, options: Ev
         agree: j.verdict === label.verdict,
         expertCritique: label.critique,
         ...(j.critique !== undefined ? { judgeCritique: j.critique } : {}),
-        ...(blind ? { blindExpert: blind.verdict } : {}),
+        ...(blind ? { blindExpert: blind } : {}),
       })
     } catch (e) {
       errors.push({ id: itemIdOfLabel(label), reason: e instanceof Error ? e.message : String(e) })
@@ -183,14 +202,25 @@ export async function evaluateJudge(all: Label[], judge: LabelJudge, options: Ev
   }
 
   const metrics = computeMetrics(items.map(i => ({ expert: i.expert, judge: i.judge })))
+  const blindWasNa = new Set(eligible.filter(l => blindOf(l) !== undefined && blindVerdict(l) === undefined).map(itemIdOfLabel))
   const revisedInSelection = eligible.filter(l => blindOf(l) !== undefined)
   const revisions: RevisionSummary = {
     revised: revisedInSelection.length,
     verdictChanged: revisedInSelection.filter(l => blindOf(l)!.verdict !== l.verdict).length,
-    blindMetrics: revisedInSelection.length === 0 ? null : computeMetrics(items.map(i => ({ expert: i.blindExpert ?? i.expert, judge: i.judge }))),
+    blindMetrics:
+      revisedInSelection.length === 0
+        ? null
+        : computeMetrics(items.filter(i => !blindWasNa.has(i.id)).map(i => ({ expert: i.blindExpert ?? i.expert, judge: i.judge }))),
   }
 
   const warnings = [...checkLabels(all)]
+  if (notApplicable.count > 0) {
+    const parts = Object.entries(notApplicable.byCriterion).map(([c, n]) => `${c} (${n})`).join(', ')
+    warnings.push(
+      `You marked ${notApplicable.count} ${options.split} item(s) as "does not apply" where the judge graded the criterion: ${parts}. They are not in the rates. ` +
+        'Several on one criterion usually means its "does not apply" wording is read differently by you and the judge.',
+    )
+  }
   if (inSplit.length === 0) warnings.push(`There are no labels in the ${options.split} split.`)
   else if (eligible.length === 0) warnings.push(`None of the ${inSplit.length} ${options.split} labels were randomly sampled, so nothing could be measured.`)
   if (excludedTargeted > 0) {
@@ -214,6 +244,7 @@ export async function evaluateJudge(all: Label[], judge: LabelJudge, options: Ev
     selection,
     inSplit: inSplit.length,
     excludedTargeted,
+    notApplicable,
     metrics,
     items,
     disagreements: items.filter(i => !i.agree),

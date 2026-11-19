@@ -184,9 +184,9 @@ describe('one criterion at a time', () => {
     await user.click(screen.getByRole('button', { name: /^Fail/ }))
     await user.type(screen.getByLabelText('Critique (required)'), 'c')
     await user.type(screen.getByLabelText('Your name'), 'Sam')
-    await user.click(screen.getByRole('button', { name: 'Save label' }))
-    await screen.findByText('Label saved.')
-    await user.click(screen.getByRole('button', { name: 'Next item' }))
+    await user.click(screen.getByRole('button', { name: 'Save and go to next' }))
+    // Saving moves on at once; the empty page asks the server again, so let that finish before moving on.
+    await waitFor(() => expect(queueCalls(fake).filter(c => c === 'asks-first').length).toBeGreaterThan(1))
 
     const done = await screen.findByRole('status', { name: 'Criterion done' })
     expect(within(done).getByText(/Nothing for/)).toHaveTextContent('Nothing for asks-first is up for review right now.')
@@ -346,14 +346,14 @@ describe('quick critiques', () => {
 
   it('are offered in the Change my label form, without the item\'s own critique', async () => {
     const user = userEvent.setup()
+    window.localStorage.setItem('evals-ui-reveal-after-save', 'on')
     const fake = installFetch(chipRoutes())
     renderApp('/classify')
     await screen.findByLabelText('Item to label')
     await user.click(screen.getByRole('button', { name: /^Fail/ }))
     await user.type(screen.getByLabelText('Critique (required)'), 'Acted without asking.')
     await user.type(screen.getByLabelText('Your name'), 'Sam')
-    await user.click(screen.getByRole('button', { name: 'Save label' }))
-    await user.click(await screen.findByRole('button', { name: 'Reveal what the judge said' }))
+    await user.click(screen.getByRole('button', { name: 'Save and show the judge' }))
     await user.click(await screen.findByRole('button', { name: 'Change my label (E)' }))
     const form = screen.getByLabelText('Change the label')
     // Pre-filled with fail, so the fail chips show at once.

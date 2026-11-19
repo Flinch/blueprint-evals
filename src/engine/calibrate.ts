@@ -2,7 +2,7 @@ import {
   contaminationProblem, countEvidence, createRubricLabelJudge, evaluateJudge, labelEvidence, type CalibrationReport, type EvidenceCounts, type LabelEvidence,
   type SavedConversation, type SavedRunLookup,
 } from '../calibration/evaluate.js'
-import { itemIdOfLabel, resolveLabels, splitOf, type Label } from '../calibration/labels.js'
+import { isGraded, itemIdOfLabel, resolveLabels, splitOf, type GradedLabel, type Label } from '../calibration/labels.js'
 import type { Config } from '../core/config.js'
 import type { ModelProvider } from '../core/interfaces.js'
 import type { Rubric } from '../core/scenario.js'
@@ -17,8 +17,9 @@ export type CalibrationSplit = 'dev' | 'test'
 export type CalibrationSelection = 'random' | 'all'
 
 /** The labels evaluateJudge will judge: the same selection it makes. Takes current labels. */
-export function selectLabels(labels: Label[], split: CalibrationSplit, selection: CalibrationSelection): Label[] {
-  const inSplit = labels.filter(l => splitOf(l) === split)
+export function selectLabels(labels: Label[], split: CalibrationSplit, selection: CalibrationSelection): GradedLabel[] {
+  // "Does not apply" labels are counted in the report, never judged.
+  const inSplit = labels.filter(isGraded).filter(l => splitOf(l) === split)
   return selection === 'random' ? inSplit.filter(l => l.sampled_by === 'random') : inSplit
 }
 

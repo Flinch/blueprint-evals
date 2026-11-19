@@ -25,7 +25,7 @@ export const LabelSchema = z
     /** What the response was responding to. A response is often only wrong relative to this. */
     input: z.string().optional(),
     output: z.string().min(1),
-    verdict: z.enum(['pass', 'fail']),
+    verdict: z.enum(['pass', 'fail', 'not_applicable']),
     /** Required on every label, not only on disagreements: confirmations with a critique are the training material. */
     critique: z.string().min(1),
     labeler: z.string().min(1),
@@ -49,6 +49,17 @@ export const LabelSchema = z
   // value would let an example be moved to the wrong side by hand.
   .strict()
 export type Label = z.infer<typeof LabelSchema>
+
+/**
+ * A label with a pass or fail verdict. `not_applicable` is the person saying the
+ * criterion does not apply to this reply, which means the judge (that put the
+ * item in the queue by grading it) read the criterion differently. Such a label
+ * removes the item from the queue but never enters agreement rates or the prompt.
+ */
+export type GradedLabel = Label & { verdict: 'pass' | 'fail' }
+export function isGraded(label: Label): label is GradedLabel {
+  return label.verdict !== 'not_applicable'
+}
 
 // ---------------------------------------------------------------- loading
 
@@ -218,8 +229,8 @@ export function splitOf(label: Pick<Label, 'id' | 'group' | 'replaces'>, seed = 
   return splitOfKey(label.group ?? itemIdOfLabel(label), seed)
 }
 
-export function partition(labels: Label[]): Record<Split, Label[]> {
-  const out: Record<Split, Label[]> = { train: [], dev: [], test: [] }
+export function partition<L extends Label>(labels: L[]): Record<Split, L[]> {
+  const out: Record<Split, L[]> = { train: [], dev: [], test: [] }
   for (const l of labels) out[splitOf(l)].push(l)
   return out
 }
@@ -266,7 +277,9 @@ export class SplitViolationError extends Error {
  * current labels (`resolveLabels(file).current`), so a revised item contributes
  * its latest verdict once.
  */
-export function anchorsFromLabels(labels: Label[]): Anchor[] {
+export function anchorsFromLabels(all: Label[]): Anchor[] {
+  // A "does not apply" label has no verdict to show the judge.
+  const labels = all.filter(isGraded)
   const offenders = labels.map(l => ({ l, split: splitOf(l) })).filter(x => x.split !== 'train')
   if (offenders.length > 0) {
     throw new SplitViolationError(

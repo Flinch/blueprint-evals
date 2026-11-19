@@ -257,10 +257,11 @@ describe('calibration stays binary', () => {
     expect(report.metrics.n).toBe(0)
   })
 
-  it('the label schema is unchanged: a label cannot carry not_applicable', () => {
+  it('a person may label an item "does not apply", and anything else is still refused', () => {
     const ok = { id: 'a', criterion: 'c', output: 'x', verdict: 'pass', critique: 'y', labeler: 'l', sampled_by: 'random', at: '2026-11-12T00:00:00.000Z' }
     expect(LabelSchema.safeParse(ok).success).toBe(true)
-    expect(LabelSchema.safeParse({ ...ok, verdict: 'not_applicable' }).success).toBe(false)
+    expect(LabelSchema.safeParse({ ...ok, verdict: 'not_applicable' }).success).toBe(true)
+    expect(LabelSchema.safeParse({ ...ok, verdict: 'skipped' }).success).toBe(false)
   })
 })
 
