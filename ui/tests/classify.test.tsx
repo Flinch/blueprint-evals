@@ -423,6 +423,9 @@ describe('blind labelling: validation and controls', () => {
     await screen.findByLabelText('Item to label')
     expect(screen.getByText('EARLIER-AGENT-LINE')).toBeInTheDocument()
     expect(screen.getByText(/Judge the whole conversation, not only this reply/)).toBeInTheDocument()
+    // The turns appear once, as a conversation, not again as one block of plain text.
+    expect(screen.getAllByText('EARLIER-AGENT-LINE')).toHaveLength(1)
+    expect(screen.getByText('The earlier conversation')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Hide the earlier conversation' }))
     expect(screen.queryByText('EARLIER-AGENT-LINE')).toBeNull()
     expect(screen.getByRole('button', { name: /Show the earlier conversation \(2 turns, 1 tool call\)/ })).toBeInTheDocument()

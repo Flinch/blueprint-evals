@@ -1042,8 +1042,9 @@ export function QueueView({
               </div>
             )}
             <div className="review-section">
-              <div className="review-label">What the agent was responding to</div>
-              <div className="review-text">{current.input}</div>
+              <div className="review-label">{current.context.length > 0 ? 'The earlier conversation' : 'What the agent was responding to'}</div>
+              {/* The same turns as plain text: shown only when there are no turns to show as a conversation. */}
+              {current.context.length === 0 ? <div className="review-text">{current.input}</div> : null}
               {current.context.length > 0 ? (
                 <div style={{ marginTop: '0.6rem' }}>
                   <button type="button" className="btn btn-ghost btn-sm" aria-expanded={showContext} onClick={() => setShowContext(s => !s)}>
