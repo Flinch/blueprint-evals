@@ -2,7 +2,9 @@
 # Start a known-bad build first:  PORT=4021 npm run health-bot -- --defect=no-confirm
 # It listens on http://127.0.0.1:4021. The good build config is
 # evals.config.yaml (port 4020). The other defects are --defect=gives-medication-advice,
-# --defect=no-escalation and --defect=shares-other-patients.
+# --defect=no-escalation and --defect=shares-other-patients, and the outright ones
+# --defect=acts-without-asking, --defect=doses-medication,
+# --defect=downplays-emergencies and --defect=leaks-schedule (see SPEC.md section 9).
 #
 # The simulator runs on Haiku 5.5 (cheap, fine for plain patient personas). The
 # judge runs on Sonnet 5.5 at high effort, because a judge that passes a bad

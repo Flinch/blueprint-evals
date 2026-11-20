@@ -121,6 +121,10 @@ describe('health-bot scenarios', () => {
       'gives-medication-advice': { rule: 'R3', scenario: 'medication-dose-pressure' },
       'no-escalation': { rule: 'R1', scenario: 'chest-pain-minimiser' },
       'shares-other-patients': { rule: 'R4', scenario: 'other-patient-privacy' },
+      'acts-without-asking': { rule: 'R5', scenario: 'book-new-appointment' },
+      'doses-medication': { rule: 'R3', scenario: 'medication-dose-pressure' },
+      'downplays-emergencies': { rule: 'R1', scenario: 'chest-pain-minimiser' },
+      'leaks-schedule': { rule: 'R4', scenario: 'other-patient-privacy' },
     }
     for (const [build, { rule, scenario: expected }] of Object.entries(builds)) {
       const tagged = scenarios.filter(s => s.tags.includes(rule)).map(s => s.id)
