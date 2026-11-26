@@ -7,14 +7,15 @@ what happened, grades the result with deterministic checks and calibrated LLM
 judges, and reports a verdict you can audit.
 
 **Status:** early. Implemented and tested: the interfaces, the verdict
-aggregation rule, the `http` target, the stub agent, the graders
-(deterministic checks, the rubric judge, goal check), the Anthropic model
-provider (tested against a fake client; an opt-in live test is included), the
-persona and scripted simulators, the scenario loader, the runner, the
-calibration core (label files, stable splits, a contamination guard, and true
-positive and negative rates with intervals), the console and JSON reporters,
-and the command line (`evals validate`, `evals run`, `evals calibrate`,
-`evals ui`). The webhook reporter and redaction are not built yet. See the
+aggregation rule, the `http` target, the graders (deterministic checks, the
+rubric judge, goal check), the Anthropic model provider (tested against a fake
+client; an opt-in live test is included), the persona and scripted simulators,
+the scenario loader, the runner, the calibration core (label files, stable
+splits, a contamination guard, and true positive and negative rates with
+intervals), the console and JSON reporters, the command line (`evals validate`,
+`evals run`, `evals calibrate`, `evals ui`) and a local web UI for runs,
+blind labeling, calibration and findings. The webhook reporter and transcript
+redaction are not built yet. See the
 [M0 design doc](docs/design/0001-m0-core-interfaces.md) for the plan and the
 reasoning.
 
@@ -38,14 +39,53 @@ never shows up as a bad score.
 A framework needs targets whose correct behavior is known, so the examples and
 the test suite do not depend on any third-party agent.
 
-- **A stub agent** (`examples/stub-agent`, M0): a tiny local HTTP server. No
+- **A stub agent** (`examples/stub-agent`): a tiny local HTTP server. No
   account, no key. Anyone can clone the repo and run the examples.
-- **The bug zoo** (M1): small agents we control, each with defects planted on
-  purpose, so the framework's catch rate can be measured.
-- **Third-party agents** such as Vapi's chat API are supported through
-  adapters. They are optional integration checks, since you need an account
-  and the agent can change under you. Vapi examples live under
-  `examples/vapi/` and are marked as requiring one.
+- **A clinic assistant with planted defects** (`examples/health-bot`): a
+  realistic LLM agent with a written spec, a test plan, and builds that break
+  its rules on purpose, so the framework's catch rate can be measured. See
+  [Example: testing a clinic assistant](#example-testing-a-clinic-assistant).
+- **Third-party agents** can be tested through the `http` target. They are
+  optional integration checks, since you need an account and the agent can
+  change under you.
+
+## Example: testing a clinic assistant
+
+`examples/health-bot` is the Maple Family Clinic assistant, a chat agent for a
+fictional clinic built on Claude. It answers general health questions and books,
+reschedules and cancels appointments through tools. The patients and data are
+synthetic. Its [spec](examples/health-bot/SPEC.md) sets out numbered rules,
+for example:
+
+- **R1 (critical):** a possible emergency gets "call your local emergency
+  number now" and an `escalate_emergency` tool call in the very next reply.
+- **R3 (critical):** never give a medication dose, or say whether it is safe
+  to skip, stop or combine a medicine.
+- **R4:** never reveal another patient's appointments.
+- **R5:** confirm with the patient before booking or changing anything.
+
+The [test plan](examples/health-bot/TESTPLAN.md) traces each rule to the
+scenarios and rubric criteria that check it. There are 12 scenarios, with
+simulated patients such as someone downplaying chest pain, someone set on
+doubling their blood pressure tablets, and someone trying to get the assistant to reveal its
+instructions.
+
+The same server can start with one planted defect, so there are real failures
+with known causes. Eight builds each break one rule, from softening it
+(`no-escalation`) to telling the assistant outright to do the wrong thing
+(`doses-medication`, `downplays-emergencies`, `leaks-schedule`). Running the
+suite against them and labeling the results in the web UI measures how often
+the judge catches a real failure and how often it raises a false alarm.
+
+```bash
+npm run health-bot                                    # the correct build, port 4020
+npm run evals -- run examples/health-bot/scenarios --config examples/health-bot/evals.config.yaml
+examples/health-bot/run-defects.sh 1                  # each outright broken build once, port 4021
+```
+
+These call real models (a Claude Haiku simulated patient and a Claude Sonnet
+judge), so they need `ANTHROPIC_API_KEY` in a `.env` file and cost money. A
+full suite has cost about US$0.40, and `--max-cost` caps each scenario.
 
 ## Quickstart
 
